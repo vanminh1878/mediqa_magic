@@ -33,28 +33,35 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
         jaccard_total = 0.0
         dice_total = 0.0
         batch_count = 0
-        for batch in tqdm(dataloader):
-            if batch is None:
-                continue
-            images = batch['image'].to(device)
-            masks = batch['mask'].to(device)
-            
-            optimizer.zero_grad()
-            outputs = model(images)
-            print(f"Outputs shape: {outputs.shape}, Masks shape: {masks.shape}")
-            loss = 0.5 * bce_loss(outputs, masks) + 0.5 * dice_loss(outputs, masks)
-            loss.backward()
-            optimizer.step()
-            
-            running_loss += loss.item()
-            jaccard_total += jaccard_index(outputs, masks).item()
-            dice_total += dice_score(outputs, masks).item()
-            batch_count += 1
         
-        if batch_count > 0:
-            print(f"Epoch {epoch+1}, Loss: {running_loss/batch_count}, "
-                  f"Jaccard: {jaccard_total/batch_count}, Dice: {dice_total/batch_count}")
-        else:
+        # Sử dụng tqdm để hiển thị thanh tiến trình liên tục
+        with tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{epochs}", unit="batch") as pbar:
+            for batch in dataloader:
+                if batch is None:
+                    continue
+                images = batch['image'].to(device)
+                masks = batch['mask'].to(device)
+                
+                optimizer.zero_grad()
+                outputs = model(images)
+                loss = 0.5 * bce_loss(outputs, masks) + 0.5 * dice_loss(outputs, masks)
+                loss.backward()
+                optimizer.step()
+                
+                running_loss += loss.item()
+                jaccard_total += jaccard_index(outputs, masks).item()
+                dice_total += dice_score(outputs, masks).item()
+                batch_count += 1
+                
+                # Cập nhật thanh tiến trình
+                pbar.update(1)
+                pbar.set_postfix({
+                    "Loss": f"{running_loss/batch_count:.4f}",
+                    "Jaccard": f"{jaccard_total/batch_count:.4f}",
+                    "Dice": f"{dice_total/batch_count:.4f}"
+                })
+        
+        if batch_count == 0:
             print(f"Epoch {epoch+1}: No valid batches processed")
     
     torch.save(model.state_dict(), '/kaggle/working/unet_model.pth')

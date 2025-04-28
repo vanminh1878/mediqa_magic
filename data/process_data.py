@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from transformers import Blip2Processor
 import torch
+from tqdm import tqdm
 
 class MediqaDataset(Dataset):
     def __init__(self, data_dir, query_file, closed_qa_file, mode='train', transform=None):
@@ -30,10 +31,9 @@ class MediqaDataset(Dataset):
         self.masks = []
         self.qa_data = []
         
-        print(f"Processing {len(self.queries)} queries from {query_file}")
-        for query in self.queries:
+        # Sử dụng tqdm để hiển thị thanh tiến trình khi xử lý queries
+        for query in tqdm(self.queries, desc="Processing queries"):
             encounter_id = query['encounter_id']
-            print(f"Encounter ID: {encounter_id}")
             
             # Lấy danh sách image_ids từ thư mục images/
             image_ids = []
@@ -42,7 +42,6 @@ class MediqaDataset(Dataset):
                     if img_file.startswith(f'IMG_{encounter_id}_') and (img_file.endswith('.png') or img_file.endswith('.jpg')):
                         img_id = img_file.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0]
                         image_ids.append(img_id)
-                print(f"Found {len(image_ids)} images for {encounter_id}: {image_ids}")
             else:
                 image_ids = query.get('image_ids', query.get('image_id', []))
                 if isinstance(image_ids, str):
@@ -67,24 +66,19 @@ class MediqaDataset(Dataset):
                     if mode == 'train' and mask_path:
                         mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                         if mask_img is None:
-                            print(f"Skipped: Mask {mask_path} is corrupted")
                             continue
                     elif mode == 'train' and not mask_path:
-                        print(f"Skipped: No mask found for {img_path}")
                         continue
-                except Exception as e:
-                    print(f"Skipped: Image {img_path} is corrupted or invalid: {e}")
+                except Exception:
                     continue
                 
                 if mode == 'train':
                     if os.path.exists(img_path) and mask_path:
                         self.image_files.append(img_path)
                         self.masks.append(mask_path)
-                        print(f"Added image: {img_path}, mask: {mask_path}")
                 else:
                     if os.path.exists(img_path):
                         self.image_files.append(img_path)
-                        print(f"Added image: {img_path}")
                 
                 # Suy ra qid từ query hoặc closed_qa_dict
                 qid = None
