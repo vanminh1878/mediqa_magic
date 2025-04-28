@@ -13,7 +13,7 @@ class MediqaDataset(Dataset):
     def __init__(self, data_dir, query_file, closed_qa_file, mode='train', transform=None):
         self.data_dir = data_dir
         self.image_dir = os.path.join(data_dir, 'images')
-        self.mask_dir = os.path.join(data_dir, 'masks', mode)
+        self.mask_dir = os	path.join(data_dir, 'masks', mode)
         self.mode = mode
         self.transform = transform or transforms.Compose([
             transforms.Resize((256, 256)),  # Chuẩn hóa kích thước
@@ -46,6 +46,8 @@ class MediqaDataset(Dataset):
                 image_ids = query.get('image_ids', query.get('image_id', []))
                 if isinstance(image_ids, str):
                     image_ids = [image_ids]
+                # Xử lý image_ids có tiền tố và hậu tố
+                image_ids = [img_id.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0] if img_id.startswith(f'IMG_{encounter_id}_') else img_id for img_id in image_ids]
             
             for img_id in image_ids:
                 img_path = os.path.join(self.image_dir, f'IMG_{encounter_id}_{img_id}.png')
@@ -69,7 +71,8 @@ class MediqaDataset(Dataset):
                             continue
                     elif mode == 'train' and not mask_path:
                         continue
-                except Exception:
+                except Exception as e:
+                    print(f"Failed to load image {img_path}: {e}")
                     continue
                 
                 if mode == 'train':
