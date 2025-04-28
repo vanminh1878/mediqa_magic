@@ -47,8 +47,8 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
     save_qa_results(qa_results, os.path.join(output_dir, 'data_cvqa_sys.json'))
 
 if __name__ == "__main__":
-    data_dir = "/kaggle/input/mediqa-data/"
-    query_file = "/kaggle/input/mediqa-data/test.json"
-    closed_qa_file = "/kaggle/input/mediqa-data/closedquestions_definitions_imageclef2025.json"
+    data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
+    query_file = "/kaggle/input/mediqa-data/mediqa-data/test.json"
+    closed_qa_file = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
     output_dir = "/kaggle/working/output/"
     run_inference(data_dir, query_file, closed_qa_file, output_dir)
