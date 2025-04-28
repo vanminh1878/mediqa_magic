@@ -13,7 +13,7 @@ class MediqaDataset(Dataset):
         self.mask_dir = os.path.join(data_dir, 'masks')
         self.mode = mode
         self.transform = transform
-        self.processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+        self.processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
         
         with open(query_file, 'r') as f:
             self.queries = json.load(f)
@@ -70,7 +70,6 @@ class MediqaDataset(Dataset):
         options = qa_info['options']
         question_text = qa_info['question_text']
         
-        # Create prompt for BLIP-2
         prompt = f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options if options else [])}"
         inputs = self.processor(images=image, text=prompt, return_tensors="pt")
         
