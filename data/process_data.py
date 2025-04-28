@@ -13,7 +13,7 @@ class MediqaDataset(Dataset):
     def __init__(self, data_dir, query_file, closed_qa_file, mode='train', transform=None):
         self.data_dir = data_dir
         self.image_dir = os.path.join(data_dir, 'images')
-        self.mask_dir = os	path.join(data_dir, 'masks', mode)
+        self.mask_dir = os.path.join(data_dir, 'masks', mode)
         self.mode = mode
         self.transform = transform or transforms.Compose([
             transforms.Resize((256, 256)),  # Chuẩn hóa kích thước
