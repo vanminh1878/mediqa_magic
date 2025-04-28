@@ -66,7 +66,7 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
     torch.save(model.state_dict(), '/kaggle/working/unet_model.pth')
 
 if __name__ == "__main__":
-    data_dir = "/kaggle/input/mediqa-data/"
-    query_file = "/kaggle/input/mediqa-data/train_cvqa.json"
-    closed_qa_file = "/kaggle/input/mediqa-data/closedquestions_definitions_imageclef2025.json"
+    data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
+    query_file = "/kaggle/input/mediqa-data/mediqa-data/train_cvqa.json"
+    closed_qa_file = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
     train_unet(data_dir, query_file, closed_qa_file)
