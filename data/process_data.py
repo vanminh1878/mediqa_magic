@@ -4,7 +4,9 @@ import cv2
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import transforms
 from transformers import Blip2Processor
+import torch
 
 class MediqaDataset(Dataset):
     def __init__(self, data_dir, query_file, closed_qa_file, mode='train', transform=None):
@@ -12,7 +14,10 @@ class MediqaDataset(Dataset):
         self.image_dir = os.path.join(data_dir, 'images')
         self.mask_dir = os.path.join(data_dir, 'masks', mode)
         self.mode = mode
-        self.transform = transform
+        self.transform = transform or transforms.Compose([
+            transforms.Resize((256, 256)),  # Chuẩn hóa kích thước
+            transforms.ToTensor(),
+        ])
         self.processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
         
         with open(query_file, 'r') as f:
@@ -58,7 +63,7 @@ class MediqaDataset(Dataset):
                 
                 # Kiểm tra file hình ảnh và mặt nạ trước khi thêm
                 try:
-                    Image.open(img_path).convert('RGB')  # Thử mở hình ảnh
+                    Image.open(img_path).convert('RGB')
                     if mode == 'train' and mask_path:
                         mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                         if mask_img is None:
@@ -116,7 +121,7 @@ class MediqaDataset(Dataset):
             image = Image.open(img_path).convert('RGB')
         except Exception as e:
             print(f"Error loading image {img_path}: {e}")
-            return None  # Bỏ qua mẫu lỗi
+            return None
         
         qa_info = self.qa_data[idx]
         query = qa_info['query']
@@ -128,30 +133,30 @@ class MediqaDataset(Dataset):
             inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt")
         except Exception as e:
             print(f"Error processing image {img_path} with Blip2Processor: {e}")
-            return None  # Bỏ qua mẫu lỗi
+            return None
         
         mask = None
         if self.mode == 'train':
             mask_img = cv2.imread(self.masks[idx], cv2.IMREAD_GRAYSCALE)
             if mask_img is not None:
                 mask = mask_img / 255.0
+                mask = Image.fromarray(mask)  # Chuyển sang PIL Image để áp dụng transform
+                if self.transform:
+                    mask = self.transform(mask)
+                    mask = mask.squeeze()  # Loại bỏ chiều kênh nếu có
             else:
                 print(f"Warning: Failed to load mask {self.masks[idx]}")
-                mask = np.zeros((256, 256))  # Giá trị mặc định
-            if self.transform:
-                try:
-                    image = self.transform(image)
-                    mask = self.transform(mask)
-                except Exception as e:
-                    print(f"Error applying transform to image/mask {img_path}: {e}")
-                    return None
+                mask = torch.zeros((256, 256))  # Giá trị mặc định
+        
+        if self.transform:
+            image = self.transform(image)
         
         return {
             'image': inputs['pixel_values'].squeeze() if inputs['pixel_values'] is not None else torch.zeros((3, 224, 224)),
             'prompt': f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}",
             'qid': qid,
             'options': options,
-            'mask': mask if mask is not None else np.zeros((256, 256)),
+            'mask': mask if mask is not None else torch.zeros((256, 256)),
             'encounter_id': qa_info['encounter_id'],
             'image_id': qa_info['image_id']
         }

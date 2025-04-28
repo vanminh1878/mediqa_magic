@@ -9,14 +9,8 @@ from tqdm import tqdm
 
 def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr=1e-4):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2)
-    ])
     
-    dataset = MediqaDataset(data_dir, query_file, closed_qa_file, mode='train', transform=transform)
+    dataset = MediqaDataset(data_dir, query_file, closed_qa_file, mode='train')
     if len(dataset) == 0:
         raise ValueError("Dataset is empty. Check image and mask files.")
     
