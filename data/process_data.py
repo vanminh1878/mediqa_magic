@@ -47,7 +47,7 @@ class MediqaDataset(Dataset):
                 img_path = os.path.join(self.image_dir, f'IMG_{encounter_id}_{img_id}.png')
                 if not os.path.exists(img_path):
                     img_path = os.path.join(self.image_dir, f'IMG_{encounter_id}_{img_id}.jpg')
-                mask_path = os.path.join(self.mask_dir, f'IMG_{encounter_id}_{img_id}_mask_0.tiff')
+                mask_path = os.path.join(self.mask_dir, f'IMG_{encounter_id}_{img_id}_mask_ann0.tiff')  # Sửa thành _mask_ann0
                 
                 if mode == 'train':
                     if os.path.exists(img_path) and os.path.exists(mask_path):
