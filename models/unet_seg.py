@@ -18,12 +18,12 @@ class UNet(nn.Module):
         super(UNet, self).__init__()
         
         # Use ResNet18 as encoder
-        resnet = resnet18(weights='IMAGENET1K_V1')  # Thay pretrained=True
-        self.encoder1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)  # 64 channels
-        self.encoder2 = resnet.layer1  # 64 channels
-        self.encoder3 = resnet.layer2  # 128 channels
-        self.encoder4 = resnet.layer3  # 256 channels
-        self.encoder5 = resnet.layer4  # 512 channels
+        resnet = resnet18(weights='IMAGENET1K_V1')
+        self.encoder1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)  # 64 channels, 64x64
+        self.encoder2 = resnet.layer1  # 64 channels, 64x64
+        self.encoder3 = resnet.layer2  # 128 channels, 32x32
+        self.encoder4 = resnet.layer3  # 256 channels, 16x16
+        self.encoder5 = resnet.layer4  # 512 channels, 8x8
         
         self.pool = nn.MaxPool2d(2)
         
@@ -34,18 +34,20 @@ class UNet(nn.Module):
             nn.Conv2d(1024, 1024, 3, padding=1),
             nn.BatchNorm2d(1024),
             nn.ReLU(inplace=True)
-        )
+        )  # 1024 channels, 8x8
         
-        self.upconv4 = nn.ConvTranspose2d(1024, 512, 2, stride=2)
-        self.decoder4 = self.double_conv(768, 512)  # 512 (upconv4) + 256 (encoder4) = 768
-        self.upconv3 = nn.ConvTranspose2d(512, 256, 2, stride=2)
-        self.decoder3 = self.double_conv(384, 256)  # 256 (upconv3) + 128 (encoder3) = 384
-        self.upconv2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-        self.decoder2 = self.double_conv(192, 128)  # 128 (upconv2) + 64 (encoder2) = 192
-        self.upconv1 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-        self.decoder1 = self.double_conv(128, 64)   # 64 (upconv1) + 64 (encoder1) = 128
+        self.upconv4 = nn.ConvTranspose2d(1024, 512, 2, stride=2)  # 512 channels, 16x16
+        self.decoder4 = self.double_conv(768, 512)  # 512 (upconv4) + 256 (encoder4) = 768, 16x16
+        self.upconv3 = nn.ConvTranspose2d(512, 256, 2, stride=2)  # 256 channels, 32x32
+        self.decoder3 = self.double_conv(384, 256)  # 256 (upconv3) + 128 (encoder3) = 384, 32x32
+        self.upconv2 = nn.ConvTranspose2d(256, 128, 2, stride=2)  # 128 channels, 64x64
+        self.decoder2 = self.double_conv(192, 128)  # 128 (upconv2) + 64 (encoder2) = 192, 64x64
+        self.upconv1 = nn.ConvTranspose2d(128, 64, 2, stride=2)  # 64 channels, 128x128
+        self.decoder1 = self.double_conv(128, 64)  # 64 (upconv1) + 64 (encoder1) = 128, 128x128
         
-        self.final_conv = nn.Conv2d(64, out_channels, 1)
+        # Thêm tầng upsample để đạt kích thước 256x256
+        self.upsample = nn.ConvTranspose2d(64, 64, 2, stride=2)  # 64 channels, 256x256
+        self.final_conv = nn.Conv2d(64, out_channels, 1)  # 1 channel, 256x256
     
     def double_conv(self, in_ch, out_ch):
         return nn.Sequential(
@@ -58,25 +60,29 @@ class UNet(nn.Module):
         )
     
     def forward(self, x):
-        e1 = self.encoder1(x)  # 64 channels
-        e2 = self.encoder2(e1)  # 64 channels
-        e3 = self.encoder3(e2)  # 128 channels
-        e4 = self.encoder4(e3)  # 256 channels
-        e5 = self.encoder5(e4)  # 512 channels
+        # Input: [batch_size, 3, 256, 256]
+        e1 = self.encoder1(x)  # 64 channels, 64x64
+        e2 = self.encoder2(e1)  # 64 channels, 64x64
+        e3 = self.encoder3(e2)  # 128 channels, 32x32
+        e4 = self.encoder4(e3)  # 256 channels, 16x16
+        e5 = self.encoder5(e4)  # 512 channels, 8x8
         
-        b = self.bottleneck(e5)  # 1024 channels
+        b = self.bottleneck(e5)  # 1024 channels, 8x8
         
-        d4 = self.upconv4(b)  # 512 channels
-        d4 = torch.cat([d4, e4], dim=1)  # 512 + 256 = 768
-        d4 = self.decoder4(d4)  # 512 channels
-        d3 = self.upconv3(d4)  # 256 channels
-        d3 = torch.cat([d3, e3], dim=1)  # 256 + 128 = 384
-        d3 = self.decoder3(d3)  # 256 channels
-        d2 = self.upconv2(d3)  # 128 channels
-        d2 = torch.cat([d2, e2], dim=1)  # 128 + 64 = 192
-        d2 = self.decoder2(d2)  # 128 channels
-        d1 = self.upconv1(d2)  # 64 channels
-        d1 = torch.cat([d1, e1], dim=1)  # 64 + 64 = 128
-        d1 = self.decoder1(d1)  # 64 channels
+        d4 = self.upconv4(b)  # 512 channels, 16x16
+        d4 = torch.cat([d4, e4], dim=1)  # 512 + 256 = 768, 16x16
+        d4 = self.decoder4(d4)  # 512 channels, 16x16
+        d3 = self.upconv3(d4)  # 256 channels, 32x32
+        d3 = torch.cat([d3, e3], dim=1)  # 256 + 128 = 384, 32x32
+        d3 = self.decoder3(d3)  # 256 channels, 32x32
+        d2 = self.upconv2(d3)  # 128 channels, 64x64
+        d2 = torch.cat([d2, e2], dim=1)  # 128 + 64 = 192, 64x64
+        d2 = self.decoder2(d2)  # 128 channels, 64x64
+        d1 = self.upconv1(d2)  # 64 channels, 128x128
+        d1 = torch.cat([d1, e1], dim=1)  # 64 + 64 = 128, 128x128
+        d1 = self.decoder1(d1)  # 64 channels, 128x128
         
-        return torch.sigmoid(self.final_conv(d1))  # 1 channel
+        # Upsample để đạt kích thước 256x256
+        out = self.upsample(d1)  # 64 channels, 256x256
+        out = self.final_conv(out)  # 1 channel, 256x256
+        return torch.sigmoid(out)  # [batch_size, 1, 256, 256]
