@@ -1,6 +1,6 @@
 torch==2.0.1
 torchvision==0.15.2
-transformers==4.35.0
+transformers
 Pillow==10.0.0
 numpy==1.26.0
 pandas==2.1.0
