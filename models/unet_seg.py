@@ -17,7 +17,7 @@ class UNet(nn.Module):
     def __init__(self, in_channels=3, out_channels=1):
         super(UNet, self).__init__()
         
-        # Use ResNet18 as encoder
+        # Sử dụng ResNet18 làm encoder
         resnet = resnet18(weights='IMAGENET1K_V1')
         self.encoder1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # 64 channels, 256x256
         self.encoder2 = resnet.layer1  # 64 channels, 256x256
@@ -44,9 +44,9 @@ class UNet(nn.Module):
         self.decoder2 = self.double_conv(192, 128)  # 128 (upconv2) + 64 (encoder2) = 192, 256x256
         self.decoder1 = self.double_conv(128, 64)  # 64 channels, 256x256
         
-        # Thêm tầng upsample để đạt kích thước 256x256
-        self.upsample = nn.ConvTranspose2d(64, 64, 2, stride=2) # 64 channels, 256x256
-        self.final_conv = nn.Conv2d(64, out_channels, 1) # 1 channel, 256x256
+        # Tầng upsample để đạt kích thước 256x256
+        self.upsample = nn.ConvTranspose2d(64, 64, 2, stride=2)  # 64 channels, 256x256
+        self.final_conv = nn.Conv2d(64, out_channels, 1)  # 1 channel, 256x256
     
     def double_conv(self, in_ch, out_ch):
         return nn.Sequential(
@@ -80,6 +80,6 @@ class UNet(nn.Module):
         d1 = self.decoder1(d2)  # 64 channels, 256x256
         
         # Upsample để đạt kích thước 256x256
-        out = self.upsample(d1) # 64 channels, 256x256
-        out = self.final_conv(d1)  # 1 channel, 256x256
+        out = self.upsample(d1)  # 64 channels, 256x256
+        out = self.final_conv(out)  # 1 channel, 256x256
         return torch.sigmoid(out)  # [batch_size, 1, 256, 256]
