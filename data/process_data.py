@@ -56,13 +56,26 @@ class MediqaDataset(Dataset):
                         mask_path = temp_path
                         break
                 
+                # Kiểm tra file hình ảnh và mặt nạ trước khi thêm
+                try:
+                    Image.open(img_path).convert('RGB')  # Thử mở hình ảnh
+                    if mode == 'train' and mask_path:
+                        mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                        if mask_img is None:
+                            print(f"Skipped: Mask {mask_path} is corrupted")
+                            continue
+                    elif mode == 'train' and not mask_path:
+                        print(f"Skipped: No mask found for {img_path}")
+                        continue
+                except Exception as e:
+                    print(f"Skipped: Image {img_path} is corrupted or invalid: {e}")
+                    continue
+                
                 if mode == 'train':
                     if os.path.exists(img_path) and mask_path:
                         self.image_files.append(img_path)
                         self.masks.append(mask_path)
                         print(f"Added image: {img_path}, mask: {mask_path}")
-                    else:
-                        print(f"Skipped: Image {img_path} or mask not found")
                 else:
                     if os.path.exists(img_path):
                         self.image_files.append(img_path)
@@ -86,8 +99,8 @@ class MediqaDataset(Dataset):
                 self.qa_data.append({
                     'encounter_id': encounter_id,
                     'image_id': img_id,
-                    'query': '',  # train_cvqa.json không có query_content_en
-                    'qid': qid,
+                    'query': '',
+                    'qid': qid if qid else '',
                     'options': options,
                     'question_text': question_text
                 })
@@ -99,7 +112,11 @@ class MediqaDataset(Dataset):
     
     def __getitem__(self, idx):
         img_path = self.image_files[idx]
-        image = Image.open(img_path).convert('RGB')
+        try:
+            image = Image.open(img_path).convert('RGB')
+        except Exception as e:
+            print(f"Error loading image {img_path}: {e}")
+            return None  # Bỏ qua mẫu lỗi
         
         qa_info = self.qa_data[idx]
         query = qa_info['query']
@@ -107,8 +124,11 @@ class MediqaDataset(Dataset):
         options = qa_info['options'] or []
         question_text = qa_info['question_text'] or ""
         
-        prompt = f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options if options else [])}"
-        inputs = self.processor(images=image, text=prompt, return_tensors="pt")
+        try:
+            inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt")
+        except Exception as e:
+            print(f"Error processing image {img_path} with Blip2Processor: {e}")
+            return None  # Bỏ qua mẫu lỗi
         
         mask = None
         if self.mode == 'train':
@@ -117,17 +137,21 @@ class MediqaDataset(Dataset):
                 mask = mask_img / 255.0
             else:
                 print(f"Warning: Failed to load mask {self.masks[idx]}")
-                mask = np.zeros((256, 256))  # Giá trị mặc định nếu mask không tải được
+                mask = np.zeros((256, 256))  # Giá trị mặc định
             if self.transform:
-                image = self.transform(image)
-                mask = self.transform(mask)
+                try:
+                    image = self.transform(image)
+                    mask = self.transform(mask)
+                except Exception as e:
+                    print(f"Error applying transform to image/mask {img_path}: {e}")
+                    return None
         
         return {
-            'image': inputs['pixel_values'].squeeze(),
-            'prompt': prompt,
+            'image': inputs['pixel_values'].squeeze() if inputs['pixel_values'] is not None else torch.zeros((3, 224, 224)),
+            'prompt': f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}",
             'qid': qid,
             'options': options,
-            'mask': mask,
+            'mask': mask if mask is not None else np.zeros((256, 256)),
             'encounter_id': qa_info['encounter_id'],
             'image_id': qa_info['image_id']
         }

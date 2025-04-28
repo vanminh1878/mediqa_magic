@@ -17,7 +17,17 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
     ])
     
     dataset = MediqaDataset(data_dir, query_file, closed_qa_file, mode='train', transform=transform)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    if len(dataset) == 0:
+        raise ValueError("Dataset is empty. Check image and mask files.")
+    
+    def collate_fn(batch):
+        # Bỏ qua các mẫu None
+        batch = [item for item in batch if item is not None]
+        if len(batch) == 0:
+            return None
+        return torch.utils.data.dataloader.default_collate(batch)
+    
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
     
     model = UNet().to(device)
     bce_loss = nn.BCELoss()
@@ -29,7 +39,10 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
         running_loss = 0.0
         jaccard_total = 0.0
         dice_total = 0.0
+        batch_count = 0
         for batch in tqdm(dataloader):
+            if batch is None:
+                continue
             images = batch['image'].to(device)
             masks = batch['mask'].to(device)
             
@@ -42,14 +55,18 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
             running_loss += loss.item()
             jaccard_total += jaccard_index(outputs, masks).item()
             dice_total += dice_score(outputs, masks).item()
+            batch_count += 1
         
-        print(f"Epoch {epoch+1}, Loss: {running_loss/len(dataloader)}, "
-              f"Jaccard: {jaccard_total/len(dataloader)}, Dice: {dice_total/len(dataloader)}")
+        if batch_count > 0:
+            print(f"Epoch {epoch+1}, Loss: {running_loss/batch_count}, "
+                  f"Jaccard: {jaccard_total/batch_count}, Dice: {dice_total/batch_count}")
+        else:
+            print(f"Epoch {epoch+1}: No valid batches processed")
     
     torch.save(model.state_dict(), '/kaggle/working/unet_model.pth')
 
 if __name__ == "__main__":
-    data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
-    query_file = "/kaggle/input/mediqa-data/mediqa-data/train_cvqa.json"
-    closed_qa_file = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
+    data_dir = "/kaggle/input/mediqa-data/"
+    query_file = "/kaggle/input/mediqa-data/train_cvqa.json"
+    closed_qa_file = "/kaggle/input/mediqa-data/closedquestions_definitions_imageclef2025.json"
     train_unet(data_dir, query_file, closed_qa_file)
