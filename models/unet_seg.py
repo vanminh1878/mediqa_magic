@@ -18,7 +18,7 @@ class UNet(nn.Module):
         super(UNet, self).__init__()
         
         # Use ResNet18 as encoder
-        resnet = resnet18(pretrained=True)
+        resnet = resnet18(weights='IMAGENET1K_V1')  # Thay pretrained=True
         self.encoder1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
         self.encoder2 = resnet.layer1
         self.encoder3 = resnet.layer2
@@ -37,13 +37,13 @@ class UNet(nn.Module):
         )
         
         self.upconv4 = nn.ConvTranspose2d(1024, 512, 2, stride=2)
-        self.decoder4 = self.double_conv(1024, 512)
+        self.decoder4 = self.double_conv(768, 512)  # Sửa 1024 thành 768 (512 + 256)
         self.upconv3 = nn.ConvTranspose2d(512, 256, 2, stride=2)
-        self.decoder3 = self.double_conv(512, 256)
+        self.decoder3 = self.double_conv(512, 256)  # 256 + 256 = 512
         self.upconv2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-        self.decoder2 = self.double_conv(256, 128)
+        self.decoder2 = self.double_conv(256, 128)  # 128 + 128 = 256
         self.upconv1 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-        self.decoder1 = self.double_conv(128, 64)
+        self.decoder1 = self.double_conv(128, 64)   # 64 + 64 = 128
         
         self.final_conv = nn.Conv2d(64, out_channels, 1)
     

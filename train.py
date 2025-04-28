@@ -15,7 +15,6 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
         raise ValueError("Dataset is empty. Check image and mask files.")
     
     def collate_fn(batch):
-        # Bỏ qua các mẫu None
         batch = [item for item in batch if item is not None]
         if len(batch) == 0:
             return None

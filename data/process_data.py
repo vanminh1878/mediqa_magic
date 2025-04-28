@@ -129,6 +129,9 @@ class MediqaDataset(Dataset):
         options = qa_info['options'] or []
         question_text = qa_info['question_text'] or ""
         
+        # Áp dụng transform cho hình ảnh trước khi gửi vào Blip2Processor
+        transformed_image = self.transform(image)
+        
         try:
             inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt")
         except Exception as e:
@@ -140,19 +143,16 @@ class MediqaDataset(Dataset):
             mask_img = cv2.imread(self.masks[idx], cv2.IMREAD_GRAYSCALE)
             if mask_img is not None:
                 mask = mask_img / 255.0
-                mask = Image.fromarray(mask)  # Chuyển sang PIL Image để áp dụng transform
+                mask = Image.fromarray(mask)
                 if self.transform:
                     mask = self.transform(mask)
-                    mask = mask.squeeze()  # Loại bỏ chiều kênh nếu có
+                    mask = mask.squeeze()
             else:
                 print(f"Warning: Failed to load mask {self.masks[idx]}")
-                mask = torch.zeros((256, 256))  # Giá trị mặc định
-        
-        if self.transform:
-            image = self.transform(image)
+                mask = torch.zeros((256, 256))
         
         return {
-            'image': inputs['pixel_values'].squeeze() if inputs['pixel_values'] is not None else torch.zeros((3, 224, 224)),
+            'image': transformed_image,  # Sử dụng hình ảnh đã transform thay vì Blip2Processor
             'prompt': f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}",
             'qid': qid,
             'options': options,
