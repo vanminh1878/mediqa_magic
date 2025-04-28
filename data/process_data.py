@@ -10,7 +10,7 @@ class MediqaDataset(Dataset):
     def __init__(self, data_dir, query_file, closed_qa_file, mode='train', transform=None):
         self.data_dir = data_dir
         self.image_dir = os.path.join(data_dir, 'images')
-        self.mask_dir = os.path.join(data_dir, 'masks', mode)  # Tìm trong masks/train hoặc masks/valid
+        self.mask_dir = os.path.join(data_dir, 'masks', mode)
         self.mode = mode
         self.transform = transform
         self.processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
@@ -47,15 +47,22 @@ class MediqaDataset(Dataset):
                 img_path = os.path.join(self.image_dir, f'IMG_{encounter_id}_{img_id}.png')
                 if not os.path.exists(img_path):
                     img_path = os.path.join(self.image_dir, f'IMG_{encounter_id}_{img_id}.jpg')
-                mask_path = os.path.join(self.mask_dir, f'IMG_{encounter_id}_{img_id}_mask_ann0.tiff')  # Sửa thành _mask_ann0
+                
+                # Thử nhiều hậu tố cho file mặt nạ
+                mask_path = None
+                for suffix in ['_mask_ann0.tiff', '_mask_ann1.tiff', '_mask_ann2.tiff', '_mask_ann3.tiff']:
+                    temp_path = os.path.join(self.mask_dir, f'IMG_{encounter_id}_{img_id}{suffix}')
+                    if os.path.exists(temp_path):
+                        mask_path = temp_path
+                        break
                 
                 if mode == 'train':
-                    if os.path.exists(img_path) and os.path.exists(mask_path):
+                    if os.path.exists(img_path) and mask_path:
                         self.image_files.append(img_path)
                         self.masks.append(mask_path)
                         print(f"Added image: {img_path}, mask: {mask_path}")
                     else:
-                        print(f"Skipped: Image {img_path} or mask {mask_path} not found")
+                        print(f"Skipped: Image {img_path} or mask not found")
                 else:
                     if os.path.exists(img_path):
                         self.image_files.append(img_path)
@@ -63,8 +70,8 @@ class MediqaDataset(Dataset):
                 
                 # Suy ra qid từ query hoặc closed_qa_dict
                 qid = None
-                options = None
-                question_text = None
+                options = []
+                question_text = ""
                 for key in query:
                     if key.startswith('CQID'):
                         qid = key
@@ -97,16 +104,20 @@ class MediqaDataset(Dataset):
         qa_info = self.qa_data[idx]
         query = qa_info['query']
         qid = qa_info['qid']
-        options = qa_info['options']
-        question_text = qa_info['question_text']
+        options = qa_info['options'] or []
+        question_text = qa_info['question_text'] or ""
         
         prompt = f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options if options else [])}"
         inputs = self.processor(images=image, text=prompt, return_tensors="pt")
         
         mask = None
         if self.mode == 'train':
-            mask = cv2.imread(self.masks[idx], cv2.IMREAD_GRAYSCALE)
-            mask = mask / 255.0
+            mask_img = cv2.imread(self.masks[idx], cv2.IMREAD_GRAYSCALE)
+            if mask_img is not None:
+                mask = mask_img / 255.0
+            else:
+                print(f"Warning: Failed to load mask {self.masks[idx]}")
+                mask = np.zeros((256, 256))  # Giá trị mặc định nếu mask không tải được
             if self.transform:
                 image = self.transform(image)
                 mask = self.transform(mask)
