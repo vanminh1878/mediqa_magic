@@ -44,8 +44,9 @@ class UNet(nn.Module):
         self.decoder2 = self.double_conv(192, 128)  # 128 (upconv2) + 64 (encoder2) = 192, 256x256
         self.decoder1 = self.double_conv(128, 64)  # 64 channels, 256x256
         
-        # Thêm tầng upsample để đảm bảo đầu ra 256x256 (nếu cần)
-        self.final_conv = nn.Conv2d(64, out_channels, 1)  # 1 channel, 256x256
+        # Thêm tầng upsample để đạt kích thước 256x256
+        self.upsample = nn.ConvTranspose2d(64, 64, 2, stride=2) # 64 channels, 256x256
+        self.final_conv = nn.Conv2d(64, out_channels, 1) # 1 channel, 256x256
     
     def double_conv(self, in_ch, out_ch):
         return nn.Sequential(
@@ -78,5 +79,7 @@ class UNet(nn.Module):
         d2 = self.decoder2(d2)  # 128 channels, 256x256
         d1 = self.decoder1(d2)  # 64 channels, 256x256
         
+        # Upsample để đạt kích thước 256x256
+        out = self.upsample(d1) # 64 channels, 256x256
         out = self.final_conv(d1)  # 1 channel, 256x256
         return torch.sigmoid(out)  # [batch_size, 1, 256, 256]

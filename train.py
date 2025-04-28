@@ -41,6 +41,7 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
             
             optimizer.zero_grad()
             outputs = model(images)
+            print(f"Outputs shape: {outputs.shape}, Masks shape: {masks.shape}")
             loss = 0.5 * bce_loss(outputs, masks) + 0.5 * dice_loss(outputs, masks)
             loss.backward()
             optimizer.step()
