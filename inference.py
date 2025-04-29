@@ -38,30 +38,39 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
     # Chạy inference
     with tqdm(total=len(dataloader), desc="Running inference", unit="image") as pbar:
         for batch in dataloader:
-            image = batch['image'].to(device)
-            prompt = batch['prompt'][0]  # Lấy chuỗi từ tensor
-            qid = batch['qid'][0]  # Lấy chuỗi từ tensor
-            options = batch['options'][0]  # Lấy danh sách từ tensor
-            encounter_id = batch['encounter_id'][0]
-            image_id = batch['image_id'][0]
-            
-            # Dự đoán mặt nạ
-            with torch.no_grad():
-                mask_pred = unet(image)
-                mask_pred = mask_pred.squeeze().cpu().numpy()
-                save_mask(mask_pred, encounter_id, image_id, os.path.join(output_dir, 'masks_preds'))
-            
-            # Trả lời câu hỏi nếu có qid và options
-            if qid and options:
-                option_idx = blip2.answer_question(image, prompt, options)
-                if option_idx >= 0:
-                    if encounter_id not in qa_results_dict:
-                        qa_results_dict[encounter_id] = {}
-                    qa_results_dict[encounter_id][qid] = option_idx
-            else:
-                print(f"Skipping QA for encounter_id: {encounter_id}, image_id: {image_id}, qid: {qid}, options: {options}")
-            
-            pbar.update(1)
+            try:
+                image = batch['image'].to(device)
+                prompt = batch['prompt'][0]  # Lấy chuỗi từ tensor
+                qid = batch['qid'][0]  # Lấy chuỗi từ tensor
+                options = batch['options'][0]  # Lấy danh sách từ tensor
+                encounter_id = batch['encounter_id'][0]
+                image_id = batch['image_id'][0]
+                
+                # Dự đoán mặt nạ
+                with torch.no_grad():
+                    mask_pred = unet(image)
+                    mask_pred = mask_pred.squeeze().cpu().numpy()
+                    save_mask(mask_pred, encounter_id, image_id, os.path.join(output_dir, 'masks_preds'))
+                
+                # Trả lời câu hỏi nếu có qid và options
+                if qid and options:
+                    option_idx = blip2.answer_question(image, prompt, options)
+                    if option_idx >= 0:
+                        if encounter_id not in qa_results_dict:
+                            qa_results_dict[encounter_id] = {}
+                        qa_results_dict[encounter_id][qid] = option_idx
+                else:
+                    print(f"Skipping QA for encounter_id: {encounter_id}, image_id: {image_id}, qid: {qid}, options: {options}")
+                
+                # Xóa tensor để giải phóng bộ nhớ
+                del image, mask_pred
+                torch.cuda.empty_cache()
+                
+                pbar.update(1)
+            except Exception as e:
+                print(f"Error processing encounter_id: {encounter_id}, image_id: {image_id}, error: {e}")
+                pbar.update(1)
+                continue
 
     # Chuyển qa_results_dict thành danh sách theo định dạng yêu cầu
     qa_results = [

@@ -26,7 +26,7 @@ nlp = spacy.load("en_core_sci_sm")
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def infer_qid(query_content, closed_qa_dict, model, threshold=0.2):
+def infer_qid(query_content, closed_qa_dict, model, threshold=0.25):
     query_content = query_content.lower().strip()
     if not query_content:
         return [(None, None, None)]
