@@ -9,3 +9,4 @@ tqdm==4.66.1
 scikit-learn==1.3.0
 tiffslide==2.5.0
 tokenizers==0.19.1
+sentence-transformers==2.7.0
