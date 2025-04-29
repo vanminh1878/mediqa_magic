@@ -10,17 +10,37 @@ import torch
 from tqdm import tqdm
 import logging
 from sentence_transformers import SentenceTransformer, util
+import spacy
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+
+# Tải tài nguyên NLTK
+nltk.download('stopwords', quiet=True)
+nltk.download('punkt', quiet=True)
+
+# Tải mô hình scispacy
+nlp = spacy.load("en_core_sci_sm")
 
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
+def infer_qid(query_content, closed_qa_dict, model, threshold=0.3):
     query_content = query_content.lower().strip()
     if not query_content:
         return [(None, None, None)]
     
-    query_embedding = model.encode(query_content, convert_to_tensor=True, show_progress_bar=False)
+    # Trích xuất từ khóa y khoa bằng scispacy
+    doc = nlp(query_content)
+    query_keywords = ' '.join([ent.text for ent in doc.ents])
+    if not query_keywords:
+        # Loại bỏ stop words nếu không tìm thấy thực thể y khoa
+        stop_words = set(stopwords.words('english'))
+        tokens = word_tokenize(query_content)
+        query_keywords = ' '.join([word for word in tokens if word not in stop_words])
+    
+    query_embedding = model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False)
     
     matched_qids = []
     for qa in closed_qa_dict:
@@ -29,7 +49,14 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
         options = qa["options_en"]
         
         combined_text = question_text + " " + " ".join(options).lower()
-        question_embedding = model.encode(combined_text, convert_to_tensor=True, show_progress_bar=False)
+        doc = nlp(combined_text)
+        combined_keywords = ' '.join([ent.text for ent in doc.ents])
+        if not combined_keywords:
+            stop_words = set(stopwords.words('english'))
+            tokens = word_tokenize(combined_text)
+            combined_keywords = ' '.join([word for word in tokens if word not in stop_words])
+        
+        question_embedding = model.encode(combined_keywords, convert_to_tensor=True, show_progress_bar=False)
         
         similarity = util.cos_sim(query_embedding, question_embedding).item()
         
@@ -41,7 +68,7 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
         return [(None, None, None)]
     
     matched_qids.sort(key=lambda x: util.cos_sim(
-        model.encode(query_content, convert_to_tensor=True, show_progress_bar=False),
+        model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
         model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
     ).item(), reverse=True)
     
@@ -58,7 +85,7 @@ class MediqaDataset(Dataset):
             transforms.ToTensor(),
         ])
         self.processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
-        self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.sentence_model = SentenceTransformer('all-mpnet-base-v2')
 
         with open(query_file, 'r') as f:
             self.queries = json.load(f)
@@ -75,7 +102,8 @@ class MediqaDataset(Dataset):
         with tqdm(total=len(self.queries), desc="Processing queries", unit="query", disable=disable_tqdm) as pbar:
             for query in self.queries:
                 encounter_id = query['encounter_id']
-                query_content = query.get('query_content_en', '')
+                # Kết hợp query_title_en và query_content_en
+                query_content = (query.get('query_title_en', '') + " " + query.get('query_content_en', '')).lower().strip()
                 
                 image_ids = []
                 if mode == 'train':
