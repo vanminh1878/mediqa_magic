@@ -70,7 +70,9 @@ class MediqaDataset(Dataset):
         self.masks = []
         self.qa_data = []
         
-        with tqdm(total=len(self.queries), desc="Processing queries", unit="query") as pbar:
+        # Tắt tqdm trong chế độ test để chỉ hiển thị một thanh tiến trình
+        disable_tqdm = (self.mode == 'test')
+        with tqdm(total=len(self.queries), desc="Processing queries", unit="query", disable=disable_tqdm) as pbar:
             for query in self.queries:
                 encounter_id = query['encounter_id']
                 query_content = query.get('query_content_en', '')
@@ -128,7 +130,11 @@ class MediqaDataset(Dataset):
                             logger.info(f"No qid inferred for encounter_id: {encounter_id}, image_id: {img_id}")
                             qid = ''
                             question_text = ''
-                            options = []
+                            options = []  # Đảm bảo options là danh sách rỗng
+                        else:
+                            # Đảm bảo options là danh sách chuỗi
+                            options = list(options) if isinstance(options, (list, tuple)) else []
+                            options = [str(opt) for opt in options]  # Chuyển tất cả thành chuỗi
                         
                         self.qa_data.append({
                             'encounter_id': encounter_id,
