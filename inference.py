@@ -11,30 +11,30 @@ from tqdm import tqdm
 def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test'):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(os.path.join(output_dir, 'masks_preds'), exist_ok=True)
-    
+
     # Tải mô hình UNet
     unet = UNet().to(device)
     unet.load_state_dict(torch.load('/kaggle/working/unet_model.pth'))
     unet.eval()
-    
+
     # Khởi tạo BLIP2QA
     blip2 = BLIP2QA(device=device)
-    
-    # Đồng bộ transform với process_data.py
+
+    # Đồng bộ transform
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor()
     ])
     dataset = MediqaDataset(data_dir, query_file, closed_qa_file, mode=mode, transform=transform)
-    
+
     if len(dataset) == 0:
-        raise ValueError("Dataset is empty. Check if images exist in the data directory or if test.json contains valid image_ids.")
-    
+        raise ValueError("Dataset is empty. Check if images exist or test.json contains valid image_ids.")
+
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
-    
-    qa_results = []
-    
-    # Sử dụng tqdm để hiển thị thanh tiến trình
+
+    qa_results_dict = {}  # Lưu kết quả theo encounter_id
+
+    # Chạy inference
     with tqdm(total=len(dataloader), desc="Running inference", unit="image") as pbar:
         for batch in dataloader:
             image = batch['image'].to(device)
@@ -54,14 +54,20 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
             if qid and options:
                 option_idx = blip2.answer_question(image, prompt, options)
                 if option_idx >= 0:
-                    qa_results.append({
-                        'encounter_id': encounter_id,
-                        qid: option_idx
-                    })
+                    if encounter_id not in qa_results_dict:
+                        qa_results_dict[encounter_id] = {}
+                    qa_results_dict[encounter_id][qid] = option_idx
+            else:
+                print(f"Skipping QA for encounter_id: {encounter_id}, image_id: {image_id}, qid: {qid}, options: {options}")
             
-            # Cập nhật thanh tiến trình
             pbar.update(1)
-    
+
+    # Chuyển qa_results_dict thành danh sách theo định dạng yêu cầu
+    qa_results = [
+        {"encounter_id": enc_id, **qid_dict}
+        for enc_id, qid_dict in qa_results_dict.items()
+    ]
+
     # Lưu kết quả QA
     save_qa_results(qa_results, os.path.join(output_dir, 'data_cvqa_sys.json'))
 
