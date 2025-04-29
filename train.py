@@ -6,6 +6,11 @@ from data.process_data import MediqaDataset
 from models.unet_seg import UNet, DiceLoss
 from utils.metrics import jaccard_index, dice_score
 from tqdm import tqdm
+import logging
+
+# Thiết lập logging
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
 
 def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr=1e-4):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
