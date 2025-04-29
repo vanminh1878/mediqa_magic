@@ -165,7 +165,7 @@ class MediqaDataset(Dataset):
                                     mask_path = temp_path
                                     break
                             if mask_path:
-                                mask_img = cv2.imread(mask_path, cv2.IMREAD GraySCALE)
+                                mask_img = cv2.imread(mask_path, cv2.IMREAD_GraySCALE)
                                 if mask_img is None:
                                     logger.warning(f"Invalid mask {mask_path}")
                                     self.skipped_samples.append((encounter_id, f"Invalid mask for image_id: {img_id}"))
