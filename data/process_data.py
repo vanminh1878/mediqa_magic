@@ -26,10 +26,10 @@ nlp = spacy.load("en_core_sci_sm")
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def infer_qid(query_content, closed_qa_dict, model, threshold=0.3):
+def infer_qid(query_content, closed_qa_dict, model, threshold=0.2):
     query_content = query_content.lower().strip()
     if not query_content:
-        return (None, None, None)
+        return [(None, None, None)]
     
     # Trích xuất từ khóa y khoa bằng scispacy
     doc = nlp(query_content)
@@ -42,9 +42,7 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.3):
     
     query_embedding = model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False)
     
-    best_match = None
-    max_similarity = -1
-    
+    matched_qids = []
     for qa in closed_qa_dict:
         qid = qa["qid"]
         question_text = qa["question_en"].lower()
@@ -65,15 +63,19 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.3):
         
         similarity = util.cos_sim(query_embedding, question_embedding).item()
         
-        if similarity > threshold and similarity > max_similarity:
-            max_similarity = similarity
-            best_match = (qid, qa["question_en"], options)
+        if similarity > threshold:
+            matched_qids.append((qid, qa["question_en"], options))
     
-    if not best_match:
+    if not matched_qids:
         logger.info(f"No qid inferred for query_content: {query_content}")
-        return (None, None, None)
+        return [(None, None, None)]
     
-    return best_match
+    matched_qids.sort(key=lambda x: util.cos_sim(
+        model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
+        model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
+    ).item(), reverse=True)
+    
+    return matched_qids
 
 class MediqaDataset(Dataset):
     def __init__(self, data_dir, query_file, closed_qa_file, mode='train', transform=None):
@@ -118,7 +120,7 @@ class MediqaDataset(Dataset):
                         image_ids = [image_ids]
                     image_ids = [img_id.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0] if img_id.startswith(f'IMG_{encounter_id}_') else img_id for img_id in image_ids]
                 
-                matched_qid = infer_qid(query_content, self.closed_qa_dict, self.sentence_model)
+                matched_qids = infer_qid(query_content, self.closed_qa_dict, self.sentence_model)
                 
                 for img_id in image_ids:
                     img_path = os.path.join(self.image_dir, f'IMG_{encounter_id}_{img_id}.png')
@@ -154,24 +156,24 @@ class MediqaDataset(Dataset):
                         if os.path.exists(img_path):
                             self.image_files.append(img_path)
                     
-                    qid, question_text, options = matched_qid
-                    if qid is None:
-                        logger.info(f"No qid inferred for encounter_id: {encounter_id}, image_id: {img_id}")
-                        qid = ''
-                        question_text = ''
-                        options = []  # Đảm bảo options là danh sách rỗng
-                    else:
-                        # Đảm bảo options là danh sách chuỗi
-                        options = [str(opt) for opt in options]
-                    
-                    self.qa_data.append({
-                        'encounter_id': encounter_id,
-                        'image_id': img_id,
-                        'query': query_content,
-                        'qid': qid,
-                        'options': options,
-                        'question_text': question_text
-                    })
+                    for qid, question_text, options in matched_qids:
+                        if qid is None:
+                            logger.info(f"No qid inferred for encounter_id: {encounter_id}, image_id: {img_id}")
+                            qid = ''
+                            question_text = ''
+                            options = []  # Đảm bảo options là danh sách rỗng
+                        else:
+                            # Đảm bảo options là danh sách chuỗi
+                            options = [str(opt) for opt in options]
+                        
+                        self.qa_data.append({
+                            'encounter_id': encounter_id,
+                            'image_id': img_id,
+                            'query': query_content,
+                            'qid': qid,
+                            'options': options,
+                            'question_text': question_text
+                        })
                 
                 pbar.update(1)
         
