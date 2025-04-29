@@ -53,11 +53,15 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
             
             # Trả lời câu hỏi nếu có qid và options
             if qid and options:
-                option_idx = blip2.answer_question(image, prompt, options)
-                if option_idx >= 0:
-                    if encounter_id not in qa_results_dict:
-                        qa_results_dict[encounter_id] = {}
-                    qa_results_dict[encounter_id][qid] = option_idx
+                # Đảm bảo qid là chuỗi
+                qid = qid[0] if isinstance(qid, (list, tuple)) and qid else ''
+                options = options[0] if isinstance(options, (list, tuple)) and options else []
+                if qid and options:
+                    option_idx = blip2.answer_question(image, prompt, options)
+                    if option_idx >= 0:
+                        if encounter_id not in qa_results_dict:
+                            qa_results_dict[encounter_id] = {}
+                        qa_results_dict[encounter_id][qid] = option_idx
             else:
                 print(f"Skipping QA for encounter_id: {encounter_id}, image_id: {image_id}, qid: {qid}, options: {options}")
             
