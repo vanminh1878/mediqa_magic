@@ -26,17 +26,16 @@ nlp = spacy.load("en_core_sci_sm")
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
+def infer_qid(query_content, closed_qa_dict, model, threshold=0.6):
     query_content = query_content.lower().strip()
     if not query_content:
-        logger.info("Empty query_content, returning all questions as fallback")
+        logger.info("Empty query_content, returning all questions")
         return [(qa["qid"], qa["question_en"], qa["options_en"]) for qa in closed_qa_dict]
     
-    # Trích xuất từ khóa y khoa bằng scispacy
+    # Trích xuất từ khóa y khoa
     doc = nlp(query_content)
     query_keywords = ' '.join([ent.text for ent in doc.ents])
     if not query_keywords:
-        # Loại bỏ stop words nếu không tìm thấy thực thể y khoa
         stop_words = set(stopwords.words('english'))
         tokens = word_tokenize(query_content)
         query_keywords = ' '.join([word for word in tokens if word not in stop_words])
@@ -48,8 +47,6 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
         qid = qa["qid"]
         question_text = qa["question_en"].lower()
         options = qa["options_en"]
-        
-        # Đảm bảo options là danh sách chuỗi
         options = [str(opt) for opt in options if opt]
         
         combined_text = question_text + " " + " ".join(options).lower()
@@ -61,18 +58,15 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
             combined_keywords = ' '.join([word for word in tokens if word not in stop_words])
         
         question_embedding = model.encode(combined_keywords, convert_to_tensor=True, show_progress_bar=False)
-        
         similarity = util.cos_sim(query_embedding, question_embedding).item()
         
         if similarity > threshold:
             matched_qids.append((qid, qa["question_en"], options))
     
-    # Nếu không tìm thấy qid nào, trả về tất cả câu hỏi để tránh bỏ sót
     if not matched_qids:
         logger.info(f"No qid inferred for query_content: {query_content}, returning all questions")
         return [(qa["qid"], qa["question_en"], qa["options_en"]) for qa in closed_qa_dict]
     
-    # Sắp xếp theo độ tương đồng
     matched_qids.sort(key=lambda x: util.cos_sim(
         model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
         model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
@@ -102,14 +96,21 @@ class MediqaDataset(Dataset):
         self.image_files = []
         self.masks = []
         self.qa_data = []
+        self.skipped_samples = []
         
-        # Tắt tqdm trong chế độ test để chỉ hiển thị một thanh tiến trình
         disable_tqdm = (self.mode == 'test')
         with tqdm(total=len(self.queries), desc="Processing queries", unit="query", disable=disable_tqdm) as pbar:
             for query in self.queries:
-                encounter_id = query['encounter_id']
-                # Kết hợp query_title_en và query_content_en
+                encounter_id = query.get('encounter_id', '')
+                if not encounter_id:
+                    logger.warning(f"Missing encounter_id in query: {query}")
+                    self.skipped_samples.append((encounter_id, "Missing encounter_id"))
+                    pbar.update(1)
+                    continue
+                
                 query_content = (query.get('query_title_en', '') + " " + query.get('query_content_en', '')).lower().strip()
+                if not query_content:
+                    query_content = "skin issue"  # Giá trị mặc định để tránh rỗng
                 
                 image_ids = []
                 if mode == 'train':
@@ -121,16 +122,29 @@ class MediqaDataset(Dataset):
                     image_ids = query.get('image_ids', query.get('image_id', []))
                     if isinstance(image_ids, str):
                         image_ids = [image_ids]
-                    # Chuẩn hóa image_ids, loại bỏ tiền tố và hậu tố nếu cần
                     image_ids = [
                         img_id.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0] 
                         if img_id.startswith(f'IMG_{encounter_id}_') else img_id 
-                        for img_id in image_ids
+                        for img_id in image_ids if img_id
                     ]
-                    image_ids = [img_id for img_id in image_ids if img_id]  # Loại bỏ rỗng
                 
                 if not image_ids:
-                    logger.info(f"No valid image_ids for encounter_id: {encounter_id}")
+                    logger.warning(f"No valid image_ids for encounter_id: {encounter_id}")
+                    self.skipped_samples.append((encounter_id, "No valid image_ids"))
+                    # Vẫn xử lý QA dựa trên query_content
+                    matched_qids = infer_qid(query_content, self.closed_qa_dict, self.sentence_model)
+                    for qid, question_text, options in matched_qids:
+                        if qid is None:
+                            continue
+                        options = [str(opt) for opt in options if opt]
+                        self.qa_data.append({
+                            'encounter_id': encounter_id,
+                            'image_id': '',
+                            'query': query_content,
+                            'qid': qid,
+                            'options': options,
+                            'question_text': question_text or ''
+                        })
                     pbar.update(1)
                     continue
                 
@@ -151,15 +165,18 @@ class MediqaDataset(Dataset):
                                     mask_path = temp_path
                                     break
                             if mask_path:
-                                mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                                mask_img = cv2.imread(mask_path, cv2.IMREAD GraySCALE)
                                 if mask_img is None:
-                                    logger.info(f"Invalid mask {mask_path}")
+                                    logger.warning(f"Invalid mask {mask_path}")
+                                    self.skipped_samples.append((encounter_id, f"Invalid mask for image_id: {img_id}"))
                                     continue
                             else:
-                                logger.info(f"No mask found for {img_path}")
+                                logger.warning(f"No mask found for {img_path}")
+                                self.skipped_samples.append((encounter_id, f"No mask for image_id: {img_id}"))
                                 continue
                     except Exception as e:
-                        logger.info(f"Failed to load image {img_path}: {e}")
+                        logger.warning(f"Failed to load image {img_path}: {e}")
+                        self.skipped_samples.append((encounter_id, f"Failed to load image_id: {img_id}, error: {e}"))
                         continue
                     
                     if mode == 'train':
@@ -172,12 +189,8 @@ class MediqaDataset(Dataset):
                     
                     for qid, question_text, options in matched_qids:
                         if qid is None:
-                            logger.info(f"No qid inferred for encounter_id: {encounter_id}, image_id: {img_id}")
                             continue
-                        
-                        # Đảm bảo options là danh sách chuỗi
                         options = [str(opt) for opt in options if opt]
-                        
                         self.qa_data.append({
                             'encounter_id': encounter_id,
                             'image_id': img_id,
@@ -191,16 +204,33 @@ class MediqaDataset(Dataset):
         
         logger.info(f"Total images in dataset: {len(self.image_files)}")
         logger.info(f"Total QA entries: {len(self.qa_data)}")
+        if self.skipped_samples:
+            logger.warning(f"Skipped samples: {len(self.skipped_samples)}")
+            for enc_id, reason in self.skipped_samples:
+                logger.warning(f"Skipped encounter_id: {enc_id}, reason: {reason}")
 
     def __len__(self):
-        return len(self.image_files)
+        return len(self.image_files) if self.image_files else len(self.qa_data)
 
     def __getitem__(self, idx):
+        if not self.image_files:
+            # Chế độ chỉ QA (không có hình ảnh)
+            qa_info = self.qa_data[idx]
+            return {
+                'image': None,
+                'prompt': f"Question: {qa_info['question_text']}\nContext: {qa_info['query']}\nOptions: {', '.join(qa_info['options'])}",
+                'qid': qa_info['qid'],
+                'options': qa_info['options'],
+                'mask': torch.zeros((1, 256, 256)),
+                'encounter_id': qa_info['encounter_id'],
+                'image_id': qa_info['image_id']
+            }
+        
         img_path = self.image_files[idx]
         try:
             image = Image.open(img_path).convert('RGB')
         except Exception as e:
-            logger.info(f"Error loading image {img_path}: {e}")
+            logger.error(f"Error loading image {img_path}: {e}")
             raise ValueError(f"Invalid image at index {idx}")
 
         qa_info = self.qa_data[idx]
@@ -214,15 +244,15 @@ class MediqaDataset(Dataset):
         try:
             inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt", do_rescale=False)
         except Exception as e:
-            logger.info(f"Error processing image {img_path} with Blip2Processor: {e}")
+            logger.error(f"Error processing image {img_path} with Blip2Processor: {e}")
             raise ValueError(f"Invalid Blip2 processing at index {idx}")
 
-        mask = torch.zeros((1, 256, 256))  # Giá trị mặc định
+        mask = torch.zeros((1, 256, 256))
         if self.mode == 'train':
             try:
                 mask_img = cv2.imread(self.masks[idx], cv2.IMREAD_GRAYSCALE)
                 if mask_img is None:
-                    logger.info(f"Invalid mask {self.masks[idx]}")
+                    logger.error(f"Invalid mask {self.masks[idx]}")
                     raise ValueError(f"Invalid mask at index {idx}")
                 mask = mask_img / 255.0
                 mask = Image.fromarray(mask)
@@ -231,14 +261,14 @@ class MediqaDataset(Dataset):
                     mask = mask.squeeze()
                     mask = mask.unsqueeze(0)
             except Exception as e:
-                logger.info(f"Error loading mask {self.masks[idx]}: {e}")
+                logger.error(f"Error loading mask {self.masks[idx]}: {e}")
                 raise ValueError(f"Invalid mask at index {idx}")
 
         return {
             'image': transformed_image,
             'prompt': f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}",
             'qid': qid,
-            'options': options if options else [],
+            'options': options,
             'mask': mask,
             'encounter_id': qa_info['encounter_id'],
             'image_id': qa_info['image_id']
