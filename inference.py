@@ -7,6 +7,7 @@ from models.blip2_qa import BLIP2QA
 from utils.helpers import save_mask, save_qa_results
 from torchvision import transforms
 from tqdm import tqdm
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test'):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
