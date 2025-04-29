@@ -28,8 +28,8 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
     if not query_content:
         return [(None, None, None)]
     
-    # Mã hóa query_content
-    query_embedding = model.encode(query_content, convert_to_tensor=True)
+    # Mã hóa query_content, tắt thanh tiến trình
+    query_embedding = model.encode(query_content, convert_to_tensor=True, show_progress_bar=False)
     
     # Tìm các qid khớp
     matched_qids = []
@@ -38,9 +38,9 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
         question_text = qa["question_en"].lower()
         options = qa["options_en"]
         
-        # Kết hợp question_text và options thành một chuỗi để mã hóa
+        # Kết hợp question_text và options, mã hóa với show_progress_bar=False
         combined_text = question_text + " " + " ".join(options).lower()
-        question_embedding = model.encode(combined_text, convert_to_tensor=True)
+        question_embedding = model.encode(combined_text, convert_to_tensor=True, show_progress_bar=False)
         
         # Tính độ tương đồng cosine
         similarity = util.cos_sim(query_embedding, question_embedding).item()
@@ -53,10 +53,10 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
         logger.info(f"No qid inferred for query_content: {query_content}")
         return [(None, None, None)]
     
-    # Sắp xếp theo độ tương đồng (nếu cần chọn top-k)
+    # Sắp xếp theo độ tương đồng
     matched_qids.sort(key=lambda x: util.cos_sim(
-        model.encode(query_content, convert_to_tensor=True),
-        model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True)
+        model.encode(query_content, convert_to_tensor=True, show_progress_bar=False),
+        model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
     ).item(), reverse=True)
     
     return matched_qids
@@ -103,7 +103,7 @@ class MediqaDataset(Dataset):
                     image_ids = query.get('image_ids', query.get('image_id', []))
                     if isinstance(image_ids, str):
                         image_ids = [image_ids]
-                    image_ids = [img_id.replace(f'IMG_{encounter_id}_', '').rsplit('.' , 1)[0] if img_id.startswith(f'IMG_{encounter_id}_') else img_id for img_id in image_ids]
+                    image_ids = [img_id.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0] if img_id.startswith(f'IMG_{encounter_id}_') else img_id for img_id in image_ids]
                 
                 # Suy ra qid dùng Sentence-BERT
                 matched_qids = infer_qid(query_content, self.closed_qa_dict, self.sentence_model)
