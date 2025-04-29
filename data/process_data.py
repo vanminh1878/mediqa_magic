@@ -48,6 +48,9 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.3):
         question_text = qa["question_en"].lower()
         options = qa["options_en"]
         
+        # Đảm bảo options là danh sách chuỗi
+        options = [str(opt) for opt in options]
+        
         combined_text = question_text + " " + " ".join(options).lower()
         doc = nlp(combined_text)
         combined_keywords = ' '.join([ent.text for ent in doc.ents])
@@ -161,8 +164,7 @@ class MediqaDataset(Dataset):
                             options = []  # Đảm bảo options là danh sách rỗng
                         else:
                             # Đảm bảo options là danh sách chuỗi
-                            options = list(options) if isinstance(options, (list, tuple)) else []
-                            options = [str(opt) for opt in options]  # Chuyển tất cả thành chuỗi
+                            options = [str(opt) for opt in options]
                         
                         self.qa_data.append({
                             'encounter_id': encounter_id,
@@ -197,7 +199,7 @@ class MediqaDataset(Dataset):
         transformed_image = self.transform(image)
         
         try:
-            inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt")
+            inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt", do_rescale=False)
         except Exception as e:
             logger.info(f"Error processing image {img_path} with Blip2Processor: {e}")
             raise ValueError(f"Invalid Blip2 processing at index {idx}")
