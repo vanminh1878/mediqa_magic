@@ -26,10 +26,11 @@ nlp = spacy.load("en_core_sci_sm")
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def infer_qid(query_content, closed_qa_dict, model, threshold=0.25):
+def infer_qid(query_content, closed_qa_dict, model, threshold=0.5):
     query_content = query_content.lower().strip()
     if not query_content:
-        return [(None, None, None)]
+        logger.info("Empty query_content, returning all questions as fallback")
+        return [(qa["qid"], qa["question_en"], qa["options_en"]) for qa in closed_qa_dict]
     
     # Trích xuất từ khóa y khoa bằng scispacy
     doc = nlp(query_content)
@@ -49,7 +50,7 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.25):
         options = qa["options_en"]
         
         # Đảm bảo options là danh sách chuỗi
-        options = [str(opt) for opt in options]
+        options = [str(opt) for opt in options if opt]
         
         combined_text = question_text + " " + " ".join(options).lower()
         doc = nlp(combined_text)
@@ -66,10 +67,12 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.25):
         if similarity > threshold:
             matched_qids.append((qid, qa["question_en"], options))
     
+    # Nếu không tìm thấy qid nào, trả về tất cả câu hỏi để tránh bỏ sót
     if not matched_qids:
-        logger.info(f"No qid inferred for query_content: {query_content}")
-        return [(None, None, None)]
+        logger.info(f"No qid inferred for query_content: {query_content}, returning all questions")
+        return [(qa["qid"], qa["question_en"], qa["options_en"]) for qa in closed_qa_dict]
     
+    # Sắp xếp theo độ tương đồng
     matched_qids.sort(key=lambda x: util.cos_sim(
         model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
         model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
@@ -118,7 +121,18 @@ class MediqaDataset(Dataset):
                     image_ids = query.get('image_ids', query.get('image_id', []))
                     if isinstance(image_ids, str):
                         image_ids = [image_ids]
-                    image_ids = [img_id.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0] if img_id.startswith(f'IMG_{encounter_id}_') else img_id for img_id in image_ids]
+                    # Chuẩn hóa image_ids, loại bỏ tiền tố và hậu tố nếu cần
+                    image_ids = [
+                        img_id.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0] 
+                        if img_id.startswith(f'IMG_{encounter_id}_') else img_id 
+                        for img_id in image_ids
+                    ]
+                    image_ids = [img_id for img_id in image_ids if img_id]  # Loại bỏ rỗng
+                
+                if not image_ids:
+                    logger.info(f"No valid image_ids for encounter_id: {encounter_id}")
+                    pbar.update(1)
+                    continue
                 
                 matched_qids = infer_qid(query_content, self.closed_qa_dict, self.sentence_model)
                 
@@ -159,12 +173,10 @@ class MediqaDataset(Dataset):
                     for qid, question_text, options in matched_qids:
                         if qid is None:
                             logger.info(f"No qid inferred for encounter_id: {encounter_id}, image_id: {img_id}")
-                            qid = ''
-                            question_text = ''
-                            options = []  # Đảm bảo options là danh sách rỗng
-                        else:
-                            # Đảm bảo options là danh sách chuỗi
-                            options = [str(opt) for opt in options]
+                            continue
+                        
+                        # Đảm bảo options là danh sách chuỗi
+                        options = [str(opt) for opt in options if opt]
                         
                         self.qa_data.append({
                             'encounter_id': encounter_id,
@@ -172,12 +184,13 @@ class MediqaDataset(Dataset):
                             'query': query_content,
                             'qid': qid,
                             'options': options,
-                            'question_text': question_text
+                            'question_text': question_text or ''
                         })
                 
                 pbar.update(1)
         
         logger.info(f"Total images in dataset: {len(self.image_files)}")
+        logger.info(f"Total QA entries: {len(self.qa_data)}")
 
     def __len__(self):
         return len(self.image_files)
@@ -225,7 +238,7 @@ class MediqaDataset(Dataset):
             'image': transformed_image,
             'prompt': f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}",
             'qid': qid,
-            'options': options if options else [],  # Đảm bảo options không rỗng
+            'options': options if options else [],
             'mask': mask,
             'encounter_id': qa_info['encounter_id'],
             'image_id': qa_info['image_id']
