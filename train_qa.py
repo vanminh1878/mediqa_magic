@@ -230,6 +230,6 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
 if __name__ == "__main__":
     data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
     train_query_file = "/kaggle/working/train_cvqa_labeled.json"
-    valid_query_file = "/kaggle/working/valid.json"
+    valid_query_file = "/kaggle/working/valid_cvqa_labeled.json"
     closed_qa_file = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
     train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file)
