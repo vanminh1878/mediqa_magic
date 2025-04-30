@@ -57,7 +57,6 @@ class MediqaQADataset(Dataset):
                 
                 image_ids = []
                 if mode == 'train':
-                    # Chỉ lấy image_id đầu tiên trong train để đơn giản hóa
                     for img_file in os.listdir(self.image_dir):
                         if img_file.startswith(f'IMG_{encounter_id}_') and (img_file.endswith('.png') or img_file.endswith('.jpg')):
                             img_id = img_file.replace(f'IMG_{encounter_id}_', '').rsplit('.', 1)[0]
@@ -115,12 +114,15 @@ class MediqaQADataset(Dataset):
                 
                 pbar.update(1)
         
+        logger.info(f"Total queries processed: {len(self.queries)}")
         logger.info(f"Total images in dataset: {len(self.image_files)}")
         logger.info(f"Total QA entries: {len(self.qa_data)}")
         if self.skipped_samples:
             logger.warning(f"Skipped samples: {len(self.skipped_samples)}")
             for enc_id, reason in self.skipped_samples:
                 logger.warning(f"Skipped encounter_id: {enc_id}, reason: {reason}")
+        if not self.qa_data:
+            logger.error("No valid QA samples generated. Check data consistency.")
 
     def __len__(self):
         return len(self.qa_data)
@@ -138,10 +140,12 @@ class MediqaQADataset(Dataset):
             logger.error(f"Error loading image {img_path}: {e}")
             transformed_image = torch.zeros(3, 224, 224)
         
+        # Thêm số thứ tự câu hỏi vào prompt để phân biệt CQID011-001, CQID011-002, ...
+        question_number = qa_info['qid'].split('-')[1] if '-' in qa_info['qid'] else "1"
         prompt = (
             f"Context: {qa_info['query']}\n"
             f"Keywords: {qa_info['keywords']}\n"
-            f"Question {qa_info['question_index']}: {qa_info['question_text']}\n"
+            f"Question {qa_info['question_index']} (Number {question_number}): {qa_info['question_text']}\n"
             f"Options: {', '.join([f'{i+1}. {opt}' for i, opt in enumerate(qa_info['options'])])}"
         )
         
