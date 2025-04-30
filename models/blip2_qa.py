@@ -1,7 +1,7 @@
 import torch
 from transformers import Blip2Processor, Blip2ForConditionalGeneration, T5ForConditionalGeneration, T5Tokenizer
 from keybert import KeyBERT
-from sentence_transformers import util
+from sentence_transformers import SentenceTransformer, util
 import spacy
 import logging
 import re
@@ -19,8 +19,9 @@ class BLIP2QA:
         # Khởi tạo T5
         self.t5_tokenizer = T5Tokenizer.from_pretrained(t5_model_name)
         self.t5_model = T5ForConditionalGeneration.from_pretrained(t5_model_name).to(device)
-        # Khởi tạo KeyBERT
+        # Khởi tạo KeyBERT và SentenceTransformer
         self.keybert_model = KeyBERT(model='all-mpnet-base-v2')
+        self.sentence_model = SentenceTransformer('all-mpnet-base-v2')
         self.nlp = spacy.load("en_core_sci_sm")
         torch.cuda.empty_cache()
         logger.info("BLIP2QA and T5 initialized successfully")
@@ -81,8 +82,8 @@ class BLIP2QA:
                 opt_keywords_text = ' '.join([kw[0] for kw in opt_keywords]) or opt_lower
                 
                 # Tính độ tương đồng ngữ nghĩa
-                answer_emb = self.keybert_model.model.encode(answer_keywords, convert_to_tensor=True, show_progress_bar=False)
-                opt_emb = self.keybert_model.model.encode(opt_keywords_text, convert_to_tensor=True, show_progress_bar=False)
+                answer_emb = self.sentence_model.encode(answer_keywords, convert_to_tensor=True, show_progress_bar=False)
+                opt_emb = self.sentence_model.encode(opt_keywords_text, convert_to_tensor=True, show_progress_bar=False)
                 sim = util.cos_sim(answer_emb, opt_emb).item()
                 
                 # Luật từ khóa

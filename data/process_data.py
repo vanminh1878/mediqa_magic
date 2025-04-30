@@ -14,7 +14,7 @@ import spacy
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-from sentence_transformers import util  # Thêm dòng này
+from sentence_transformers import SentenceTransformer, util
 
 # Tải tài nguyên NLTK
 nltk.download('stopwords', quiet=True)
@@ -27,7 +27,7 @@ nlp = spacy.load("en_core_sci_sm")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def infer_qid(query_content, closed_qa_dict, keybert_model, threshold=0.4):
+def infer_qid(query_content, closed_qa_dict, keybert_model, sentence_model, threshold=0.4):
     query_content = query_content.lower().strip()
     if not query_content:
         logger.info("Empty query_content, returning all questions")
@@ -79,8 +79,8 @@ def infer_qid(query_content, closed_qa_dict, keybert_model, threshold=0.4):
                 combined_keywords = ' '.join([word for word in tokens if word not in stop_words])
         
         # So sánh từ khóa bằng độ tương đồng ngữ nghĩa
-        query_embedding = keybert_model.model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False)
-        question_embedding = keybert_model.model.encode(combined_keywords, convert_to_tensor=True, show_progress_bar=False)
+        query_embedding = sentence_model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False)
+        question_embedding = sentence_model.encode(combined_keywords, convert_to_tensor=True, show_progress_bar=False)
         similarity = util.cos_sim(query_embedding, question_embedding).item()
         
         if similarity > threshold:
@@ -92,8 +92,8 @@ def infer_qid(query_content, closed_qa_dict, keybert_model, threshold=0.4):
     
     # Sắp xếp theo độ tương đồng
     matched_qids.sort(key=lambda x: util.cos_sim(
-        keybert_model.model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
-        keybert_model.model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
+        sentence_model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
+        sentence_model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
     ).item(), reverse=True)
     
     return matched_qids[:5]  # Giới hạn tối đa 5 qid để tránh dư thừa
@@ -110,6 +110,7 @@ class MediqaDataset(Dataset):
         ])
         self.processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
         self.keybert_model = KeyBERT(model='all-mpnet-base-v2')
+        self.sentence_model = SentenceTransformer('all-mpnet-base-v2')
 
         with open(query_file, 'r') as f:
             self.queries = json.load(f)
@@ -152,7 +153,7 @@ class MediqaDataset(Dataset):
                         for img_id in image_ids if img_id
                     ]
                 
-                matched_qids = infer_qid(query_content, self.closed_qa_dict, self.keybert_model)
+                matched_qids = infer_qid(query_content, self.closed_qa_dict, self.keybert_model, self.sentence_model)
                 
                 if not image_ids:
                     logger.warning(f"No valid image_ids for encounter_id: {encounter_id}")
