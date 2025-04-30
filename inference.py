@@ -16,6 +16,26 @@ logger = logging.getLogger(__name__)
 
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
+def post_process_qa_results(qa_results_dict, closed_qa_dict):
+    """Kiểm tra tính nhất quán giữa các câu hỏi liên quan"""
+    for enc_id, qid_dict in qa_results_dict.items():
+        # Nhóm câu hỏi CQID011 (vị trí tổn thương)
+        location_qids = [qid for qid in qid_dict if qid.startswith('CQID011-')]
+        if location_qids:
+            # Nếu có câu hỏi vị trí chọn cụ thể (không phải "Not mentioned"), CQID010-001 không nên là "Not mentioned"
+            location_selected = any(
+                qid_dict[qid] != len(closed_qa_dict[[qa['qid'] for qa in closed_qa_dict].index(qid)]['options_en']) - 1
+                for qid in location_qids
+            )
+            if 'CQID010-001' in qid_dict:
+                not_mentioned_idx = len(closed_qa_dict[[qa['qid'] for qa in closed_qa_dict].index('CQID010-001')]['options_en']) - 1
+                if location_selected and qid_dict['CQID010-001'] == not_mentioned_idx:
+                    # Chọn "limited area" thay vì "Not mentioned"
+                    qid_dict['CQID010-001'] = 1
+                    logger.info(f"Updated CQID010-001 for encounter_id {enc_id} to 'limited area' for consistency")
+    
+    return qa_results_dict
+
 def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test'):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(os.path.join(output_dir, 'masks_preds'), exist_ok=True)
@@ -70,6 +90,14 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
         logger.error(f"Error loading test.json: {e}")
         raise
 
+    # Tải closed_qa_dict để dùng trong post-processing
+    try:
+        with open(closed_qa_file, 'r') as f:
+            closed_qa_dict = json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading closed_qa_file: {e}")
+        raise
+
     qa_results_dict = {}
     processed_samples = 0
     skipped_samples = []
@@ -95,7 +123,6 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
                             logger.debug(f"Saved mask for encounter_id: {encounter_id}, image_id: {image_id}")
                     except Exception as e:
                         logger.warning(f"Error predicting mask for encounter_id: {encounter_id}, image_id: {image_id}, error: {e}")
-                        # Tiếp tục xử lý QA dù không có mask
 
                 # Trả lời câu hỏi
                 if qid and options:
@@ -129,12 +156,15 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
                 pbar.update(1)
                 continue
 
-    # Xử lý các encounter_id không có trong dataset (do lỗi hình ảnh hoặc khác)
+    # Xử lý các encounter_id không có trong dataset
     missing_encounter_ids = all_encounter_ids - set(qa_results_dict.keys())
     for enc_id in missing_encounter_ids:
         logger.warning(f"Missing encounter_id in results: {enc_id}")
-        qa_results_dict[enc_id] = {}  # Thêm encounter_id rỗng để đảm bảo đầy đủ
+        qa_results_dict[enc_id] = {}
         skipped_samples.append((enc_id, "", "Missing in dataset"))
+
+    # Tối ưu hóa sau xử lý
+    qa_results_dict = post_process_qa_results(qa_results_dict, closed_qa_dict)
 
     # Báo cáo kết quả
     logger.info(f"Processed samples: {processed_samples}/{expected_samples}")
@@ -143,7 +173,7 @@ def run_inference(data_dir, query_file, closed_qa_file, output_dir, mode='test')
         for enc_id, img_id, err in skipped_samples:
             logger.warning(f"Skipped encounter_id: {enc_id}, image_id: {img_id}, error: {err}")
 
-    # Chuyển qa_results_dict thành danh sách theo định dạng yêu cầu
+    # Chuyển qa_results_dict thành danh sách
     qa_results = [
         {"encounter_id": enc_id, **qid_dict}
         for enc_id, qid_dict in qa_results_dict.items()

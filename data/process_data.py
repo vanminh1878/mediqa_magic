@@ -9,7 +9,7 @@ from transformers import Blip2Processor
 import torch
 from tqdm import tqdm
 import logging
-from sentence_transformers import SentenceTransformer, util
+from keybert import KeyBERT
 import spacy
 import nltk
 from nltk.corpus import stopwords
@@ -23,24 +23,33 @@ nltk.download('punkt', quiet=True)
 nlp = spacy.load("en_core_sci_sm")
 
 # Thiết lập logging
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def infer_qid(query_content, closed_qa_dict, model, threshold=0.6):
+def infer_qid(query_content, closed_qa_dict, keybert_model, threshold=0.4):
     query_content = query_content.lower().strip()
     if not query_content:
         logger.info("Empty query_content, returning all questions")
         return [(qa["qid"], qa["question_en"], qa["options_en"]) for qa in closed_qa_dict]
     
-    # Trích xuất từ khóa y khoa
-    doc = nlp(query_content)
-    query_keywords = ' '.join([ent.text for ent in doc.ents])
+    # Trích xuất từ khóa bằng KeyBERT
+    keywords = keybert_model.extract_keywords(
+        query_content,
+        keyphrase_ngram_range=(1, 2),
+        stop_words='english',
+        top_n=5,
+        use_mmr=True,
+        diversity=0.5
+    )
+    query_keywords = ' '.join([kw[0] for kw in keywords])
     if not query_keywords:
-        stop_words = set(stopwords.words('english'))
-        tokens = word_tokenize(query_content)
-        query_keywords = ' '.join([word for word in tokens if word not in stop_words])
-    
-    query_embedding = model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False)
+        # Fallback: Dùng scispacy
+        doc = nlp(query_content)
+        query_keywords = ' '.join([ent.text for ent in doc.ents])
+        if not query_keywords:
+            stop_words = set(stopwords.words('english'))
+            tokens = word_tokenize(query_content)
+            query_keywords = ' '.join([word for word in tokens if word not in stop_words])
     
     matched_qids = []
     for qa in closed_qa_dict:
@@ -49,15 +58,28 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.6):
         options = qa["options_en"]
         options = [str(opt) for opt in options if opt]
         
+        # Trích xuất từ khóa từ câu hỏi và options
         combined_text = question_text + " " + " ".join(options).lower()
-        doc = nlp(combined_text)
-        combined_keywords = ' '.join([ent.text for ent in doc.ents])
+        keywords = keybert_model.extract_keywords(
+            combined_text,
+            keyphrase_ngram_range=(1, 2),
+            stop_words='english',
+            top_n=5,
+            use_mmr=True,
+            diversity=0.5
+        )
+        combined_keywords = ' '.join([kw[0] for kw in keywords])
         if not combined_keywords:
-            stop_words = set(stopwords.words('english'))
-            tokens = word_tokenize(combined_text)
-            combined_keywords = ' '.join([word for word in tokens if word not in stop_words])
+            doc = nlp(combined_text)
+            combined_keywords = ' '.join([ent.text for ent in doc.ents])
+            if not combined_keywords:
+                stop_words = set(stopwords.words('english'))
+                tokens = word_tokenize(combined_text)
+                combined_keywords = ' '.join([word for word in tokens if word not in stop_words])
         
-        question_embedding = model.encode(combined_keywords, convert_to_tensor=True, show_progress_bar=False)
+        # So sánh từ khóa bằng độ tương đồng ngữ nghĩa
+        query_embedding = keybert_model.model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False)
+        question_embedding = keybert_model.model.encode(combined_keywords, convert_to_tensor=True, show_progress_bar=False)
         similarity = util.cos_sim(query_embedding, question_embedding).item()
         
         if similarity > threshold:
@@ -67,12 +89,13 @@ def infer_qid(query_content, closed_qa_dict, model, threshold=0.6):
         logger.info(f"No qid inferred for query_content: {query_content}, returning all questions")
         return [(qa["qid"], qa["question_en"], qa["options_en"]) for qa in closed_qa_dict]
     
+    # Sắp xếp theo độ tương đồng
     matched_qids.sort(key=lambda x: util.cos_sim(
-        model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
-        model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
+        keybert_model.model.encode(query_keywords, convert_to_tensor=True, show_progress_bar=False),
+        keybert_model.model.encode(x[1] + " " + " ".join(x[2]).lower(), convert_to_tensor=True, show_progress_bar=False)
     ).item(), reverse=True)
     
-    return matched_qids
+    return matched_qids[:5]  # Giới hạn tối đa 5 qid để tránh dư thừa
 
 class MediqaDataset(Dataset):
     def __init__(self, data_dir, query_file, closed_qa_file, mode='train', transform=None):
@@ -85,7 +108,7 @@ class MediqaDataset(Dataset):
             transforms.ToTensor(),
         ])
         self.processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
-        self.sentence_model = SentenceTransformer('all-mpnet-base-v2')
+        self.keybert_model = KeyBERT(model='all-mpnet-base-v2')
 
         with open(query_file, 'r') as f:
             self.queries = json.load(f)
@@ -110,7 +133,7 @@ class MediqaDataset(Dataset):
                 
                 query_content = (query.get('query_title_en', '') + " " + query.get('query_content_en', '')).lower().strip()
                 if not query_content:
-                    query_content = "skin issue"  # Giá trị mặc định để tránh rỗng
+                    query_content = "skin issue"
                 
                 image_ids = []
                 if mode == 'train':
@@ -128,11 +151,11 @@ class MediqaDataset(Dataset):
                         for img_id in image_ids if img_id
                     ]
                 
+                matched_qids = infer_qid(query_content, self.closed_qa_dict, self.keybert_model)
+                
                 if not image_ids:
                     logger.warning(f"No valid image_ids for encounter_id: {encounter_id}")
                     self.skipped_samples.append((encounter_id, "No valid image_ids"))
-                    # Vẫn xử lý QA dựa trên query_content
-                    matched_qids = infer_qid(query_content, self.closed_qa_dict, self.sentence_model)
                     for qid, question_text, options in matched_qids:
                         if qid is None:
                             continue
@@ -147,8 +170,6 @@ class MediqaDataset(Dataset):
                         })
                     pbar.update(1)
                     continue
-                
-                matched_qids = infer_qid(query_content, self.closed_qa_dict, self.sentence_model)
                 
                 for img_id in image_ids:
                     img_path = os.path.join(self.image_dir, f'IMG_{encounter_id}_{img_id}.png')
@@ -165,7 +186,7 @@ class MediqaDataset(Dataset):
                                     mask_path = temp_path
                                     break
                             if mask_path:
-                                mask_img = cv2.imread(mask_path, cv2.IMREAD_GraySCALE)
+                                mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                                 if mask_img is None:
                                     logger.warning(f"Invalid mask {mask_path}")
                                     self.skipped_samples.append((encounter_id, f"Invalid mask for image_id: {img_id}"))
@@ -214,7 +235,6 @@ class MediqaDataset(Dataset):
 
     def __getitem__(self, idx):
         if not self.image_files:
-            # Chế độ chỉ QA (không có hình ảnh)
             qa_info = self.qa_data[idx]
             return {
                 'image': None,
