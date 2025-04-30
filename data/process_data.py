@@ -123,7 +123,7 @@ class MediqaDataset(Dataset):
         self.qa_data = []
         self.skipped_samples = []
         
-        disable_tqdm = (self.mode == 'test')
+        disable_tqdm = False  # Bật tqdm để thấy tiến trình
         with tqdm(total=len(self.queries), desc="Processing queries", unit="query", disable=disable_tqdm) as pbar:
             for query in self.queries:
                 encounter_id = query.get('encounter_id', '')
@@ -264,7 +264,7 @@ class MediqaDataset(Dataset):
         transformed_image = self.transform(image)
         
         try:
-            inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt", do_rescale=False)
+            inputs = self.processor(images=image, text=f"Question: {question_text}\nContext: {query}\nOptions: {', '.join(options)}", return_tensors="pt")
         except Exception as e:
             logger.error(f"Error processing image {img_path} with Blip2Processor: {e}")
             raise ValueError(f"Invalid Blip2 processing at index {idx}")

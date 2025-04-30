@@ -35,7 +35,7 @@ class BLIP2QA:
         
         # Cách 1: Sử dụng BLIP2 để sinh câu trả lời
         if image is not None:
-            inputs = self.blip_processor(images=image, text=prompt, return_tensors="pt", do_rescale=False).to(self.device, torch.float16)
+            inputs = self.blip_processor(images=image, text=prompt, return_tensors="pt").to(self.device, torch.float16)
         else:
             inputs = self.blip_processor(text=prompt, return_tensors="pt").to(self.device, torch.float16)
         
