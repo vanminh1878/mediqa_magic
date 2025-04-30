@@ -1,10 +1,10 @@
 import torch
 from transformers import Blip2Processor, Blip2ForConditionalGeneration, T5ForConditionalGeneration, T5Tokenizer
 from keybert import KeyBERT
+from sentence_transformers import util
 import spacy
 import logging
 import re
-from sentence_transformers import util
 
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -116,6 +116,7 @@ class BLIP2QA:
         few_shot_prompt = (
             "Example 1: Question: Where is the affected area? Context: A patient with pleural effusion is accompanied by a systemic rash, as seen in the picture (currently only the back picture is available). Options: 1. head, 2. neck, 3. upper extremities, 4. lower extremities, 5. chest/abdomen, 6. back, 7. other, 8. Not mentioned. Answer: 6.\n"
             "Example 2: Question: How long ago did the lesion appear? Context: It started 2 weeks ago. Options: 1. Less than 1 week, 2. 1-4 weeks, 3. More than 4 weeks, 4. Not mentioned. Answer: 2.\n"
+            "Example 3: Question: How long ago did the lesion appear? Context: On the outside of the thigh, there is a small circle of lump. Approximately 2 months. Options: 1. Less than 1 week, 2. 1-4 weeks, 3. More than 4 weeks, 4. Not mentioned. Answer: 3.\n"
             f"Question: {prompt.split('Question: ')[1].split('\nContext: ')[0]} Context: {prompt.split('Context: ')[1].split('\nOptions: ')[0]} Options: {', '.join([f'{i+1}. {opt}' for i, opt in enumerate(options)])}. Answer: ?"
         )
         

@@ -14,12 +14,13 @@ import spacy
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+from sentence_transformers import util  # Thêm dòng này
 
 # Tải tài nguyên NLTK
 nltk.download('stopwords', quiet=True)
 nltk.download('punkt', quiet=True)
 
-# Tải mô hình scispacy
+# Tải mô hình spacy
 nlp = spacy.load("en_core_sci_sm")
 
 # Thiết lập logging
@@ -43,7 +44,7 @@ def infer_qid(query_content, closed_qa_dict, keybert_model, threshold=0.4):
     )
     query_keywords = ' '.join([kw[0] for kw in keywords])
     if not query_keywords:
-        # Fallback: Dùng scispacy
+        # Fallback: Dùng spacy
         doc = nlp(query_content)
         query_keywords = ' '.join([ent.text for ent in doc.ents])
         if not query_keywords:
