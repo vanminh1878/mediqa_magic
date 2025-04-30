@@ -6,4 +6,4 @@ numpy==1.26.0
 opencv-python==4.8.1.78
 tqdm==4.66.1
 spacy==3.4.4
-en-core-sci-sm==0.5.1
+scispacy==0.5.1
