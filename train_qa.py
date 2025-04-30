@@ -12,7 +12,38 @@ import json
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epochs=5, batch_size=4, lr=1e-5):
+def custom_collate_fn(batch):
+    """
+    Collate function để xử lý batch với các trường không đồng nhất.
+    - image: Chuyển thành tensor.
+    - prompt, qid, options, encounter_id, image_id: Giữ nguyên dạng list.
+    - question_index: Chuyển thành tensor.
+    """
+    # Lọc bỏ các mẫu None
+    batch = [item for item in batch if item is not None]
+    if not batch:
+        return None
+    
+    # Tách các trường
+    images = torch.stack([item['image'] for item in batch])
+    prompts = [item['prompt'] for item in batch]
+    qids = [item['qid'] for item in batch]
+    question_indices = torch.tensor([item['question_index'] for item in batch])
+    options = [item['options'] for item in batch]
+    encounter_ids = [item['encounter_id'] for item in batch]
+    image_ids = [item['image_id'] for item in batch]
+    
+    return {
+        'image': images,
+        'prompt': prompts,
+        'qid': qids,
+        'question_index': question_indices,
+        'options': options,
+        'encounter_id': encounter_ids,
+        'image_id': image_ids
+    }
+
+def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epochs=5, batch_size=2, lr=1e-5):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Tải dataset
@@ -28,8 +59,8 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
     if len(train_dataset) == 0 or len(valid_dataset) == 0:
         raise ValueError("Dataset is empty. Check data files.")
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=custom_collate_fn)
+    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=custom_collate_fn)
     
     # Tải mô hình
     clip_qa = CLIPQA(device=device)
@@ -58,26 +89,34 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
         
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch+1}/{epochs}", unit="batch") as pbar:
             for batch in train_loader:
+                if batch is None:
+                    pbar.update(1)
+                    continue
+                
                 try:
                     images = batch['image'].to(device)
                     prompts = batch['prompt']
                     qids = batch['qid']
                     options = batch['options']
                     encounter_ids = batch['encounter_id']
-                    question_indices = batch['question_index']
+                    question_indices = batch['question_index'].to(device)
                     
                     optimizer.zero_grad()
                     
                     # Chuẩn bị inputs
                     batch_size = len(prompts)
                     all_text_inputs = []
+                    max_options = max(len(opt) for opt in options)
+                    
                     for i in range(batch_size):
-                        text_inputs = [prompts[i] + f"\nAnswer: {opt}" for opt in options[i]]
+                        # Padding options nếu cần
+                        curr_options = options[i] + [""] * (max_options - len(options[i]))
+                        text_inputs = [prompts[i] + f"\nAnswer: {opt}" for opt in curr_options]
                         all_text_inputs.extend(text_inputs)
                     
                     inputs = clip_qa.processor(
                         text=all_text_inputs,
-                        images=images.repeat_interleave(len(options[0]), dim=0),
+                        images=images.repeat_interleave(max_options, dim=0),
                         return_tensors="pt",
                         padding=True,
                         truncation=True
@@ -85,12 +124,20 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
                     
                     # Dự đoán
                     outputs = model(**inputs)
-                    logits = outputs.logits_per_image.view(batch_size, len(options[0]))
+                    logits = outputs.logits_per_image.view(batch_size, max_options)
                     
-                    # Tính loss
-                    labels = torch.tensor([
-                        train_labels[enc_id][qid] for enc_id, qid in zip(encounter_ids, qids)
-                    ]).to(device)
+                    # Trong vòng lặp train
+                    labels = []
+                    for enc_id, qid in zip(encounter_ids, qids):
+                        label = train_labels.get(enc_id, {}).get(qid, None)
+                        if label is None:
+                            logger.warning(f"Missing label for encounter_id: {enc_id}, qid: {qid}. Skipping sample.")
+                            continue
+                        labels.append(label)
+                    if not labels:
+                        pbar.update(1)
+                        continue
+                    labels = torch.tensor(labels).to(device)
                     loss = criterion(logits, labels)
                     loss.backward()
                     optimizer.step()
@@ -120,6 +167,9 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
         valid_total = 0
         with torch.no_grad():
             for batch in valid_loader:
+                if batch is None:
+                    continue
+                
                 try:
                     images = batch['image'].to(device)
                     prompts = batch['prompt']
@@ -129,24 +179,36 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
                     
                     batch_size = len(prompts)
                     all_text_inputs = []
+                    max_options = max(len(opt) for opt in options)
+                    
                     for i in range(batch_size):
-                        text_inputs = [prompts[i] + f"\nAnswer: {opt}" for opt in options[i]]
+                        curr_options = options[i] + [""] * (max_options - len(options[i]))
+                        text_inputs = [prompts[i] + f"\nAnswer: {opt}" for opt in curr_options]
                         all_text_inputs.extend(text_inputs)
                     
                     inputs = clip_qa.processor(
                         text=all_text_inputs,
-                        images=images.repeat_interleave(len(options[0]), dim=0),
+                        images=images.repeat_interleave(max_options, dim=0),
                         return_tensors="pt",
                         padding=True,
                         truncation=True
                     ).to(device)
                     
                     outputs = model(**inputs)
-                    logits = outputs.logits_per_image.view(batch_size, len(options[0]))
+                    logits = outputs.logits_per_image.view(batch_size, max_options)
                     
-                    labels = torch.tensor([
-                        valid_labels[enc_id][qid] for enc_id, qid in zip(encounter_ids, qids)
-                    ]).to(device)
+                    # Trong vòng lặp train
+                    labels = []
+                    for enc_id, qid in zip(encounter_ids, qids):
+                        label = train_labels.get(enc_id, {}).get(qid, None)
+                        if label is None:
+                            logger.warning(f"Missing label for encounter_id: {enc_id}, qid: {qid}. Skipping sample.")
+                            continue
+                        labels.append(label)
+                    if not labels:
+                        pbar.update(1)
+                        continue
+                    labels = torch.tensor(labels).to(device)
                     preds = logits.argmax(dim=1)
                     valid_correct += (preds == labels).sum().item()
                     valid_total += batch_size
