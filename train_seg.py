@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from data.process_data import MediqaDataset
+from data.process_data_seg import MediqaSegDataset
 from models.unet_seg import UNet, DiceLoss
 from utils.metrics import jaccard_index, dice_score
 from tqdm import tqdm
@@ -12,20 +12,17 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr=1e-4):
+def train_unet(data_dir, query_file, epochs=10, batch_size=2, lr=1e-4):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    dataset = MediqaDataset(data_dir, query_file, closed_qa_file, mode='train')
+    dataset = MediqaSegDataset(data_dir, query_file, mode='train')
     if len(dataset) == 0:
         raise ValueError("Dataset is empty. Check image and mask files.")
     
     def collate_fn(batch):
-        # Lọc bỏ mẫu không hợp lệ
         batch = [item for item in batch if item is not None]
         if not batch:
             return None
-        
-        # Đảm bảo cấu trúc đồng nhất
         try:
             return torch.utils.data.dataloader.default_collate(batch)
         except Exception as e:
@@ -92,5 +89,4 @@ def train_unet(data_dir, query_file, closed_qa_file, epochs=10, batch_size=2, lr
 if __name__ == "__main__":
     data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
     query_file = "/kaggle/input/mediqa-data/mediqa-data/train_cvqa.json"
-    closed_qa_file = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
-    train_unet(data_dir, query_file, closed_qa_file)
+    train_unet(data_dir, query_file)
