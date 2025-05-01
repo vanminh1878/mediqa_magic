@@ -16,13 +16,25 @@ class MediqaSegDataset(Dataset):
     def __init__(self, data_dir, query_file, mode='train', transform=None):
         self.data_dir = data_dir
         self.image_dir = os.path.join(data_dir, 'images')
-        self.mask_dir = os.path.join(data_dir, 'masks', mode)
+        # Sửa mask_dir để trỏ đến images/masks/{mode}
+        self.mask_dir = os.path.join(data_dir, 'images', 'masks', mode)
         self.mode = mode
         self.transform = transform or transforms.Compose([
             transforms.Resize((256, 256)),
             transforms.ToTensor(),
         ])
         
+        # Kiểm tra sự tồn tại của thư mục
+        logger.info(f"Image dir: {self.image_dir}")
+        logger.info(f"Mask dir: {self.mask_dir}")
+        if not os.path.exists(self.image_dir):
+            logger.error(f"Image directory {self.image_dir} does not exist")
+            raise FileNotFoundError(f"Image directory {self.image_dir} does not exist")
+        if not os.path.exists(self.mask_dir):
+            logger.error(f"Mask directory {self.mask_dir} does not exist")
+            raise FileNotFoundError(f"Mask directory {self.mask_dir} does not exist")
+        
+        # Đọc file query
         with open(query_file, 'r') as f:
             self.queries = json.load(f)
         
@@ -86,10 +98,15 @@ class MediqaSegDataset(Dataset):
                 pbar.update(1)
         
         logger.info(f"Total images in dataset: {len(self.image_files)}")
+        logger.info(f"Image files: {self.image_files}")
+        logger.info(f"Mask files: {self.masks}")
         if self.skipped_samples:
             logger.warning(f"Skipped samples: {len(self.skipped_samples)}")
             for enc_id, reason in self.skipped_samples:
                 logger.warning(f"Skipped encounter_id: {enc_id}, reason: {reason}")
+        if len(self.image_files) == 0:
+            logger.error("No valid samples found in dataset")
+            raise ValueError("No valid samples found in dataset")
 
     def __len__(self):
         return len(self.image_files)
