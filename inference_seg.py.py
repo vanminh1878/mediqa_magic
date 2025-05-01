@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
-def run_seg_inference(data_dir, query_file, output_dir, mode='val'):
+def run_seg_inference(data_dir, query_file, output_dir, mode='valid'):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(os.path.join(output_dir, 'masks_preds'), exist_ok=True)
 
