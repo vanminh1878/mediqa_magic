@@ -21,7 +21,7 @@ def run_seg_inference(data_dir, query_file, output_dir, mode='valid'):
     # Tải mô hình UNet
     unet = UNet().to(device)
     try:
-        unet.load_state_dict(torch.load('/kaggle/working/unet_model.pth', map_location=device))
+        unet.load_state_dict(torch.load('/kaggle/working/unet_model.pth', map_location=device, weights_only=True))
         logger.info("UNet model loaded successfully")
     except Exception as e:
         logger.error(f"Error loading UNet model: {e}")
@@ -38,6 +38,9 @@ def run_seg_inference(data_dir, query_file, output_dir, mode='valid'):
     try:
         dataset = MediqaSegDataset(data_dir, query_file, mode=mode, transform=transform)
         logger.info(f"Dataset loaded with {len(dataset)} samples")
+        if len(dataset) == 0:
+            logger.error("Empty dataset. Check image and mask paths.")
+            raise ValueError("Empty dataset")
     except Exception as e:
         logger.error(f"Error loading dataset: {e}")
         raise
@@ -59,6 +62,7 @@ def run_seg_inference(data_dir, query_file, output_dir, mode='valid'):
                 # Dự đoán mặt nạ
                 with torch.no_grad():
                     mask_pred = unet(image)
+                    logger.info(f"Mask pred shape: {mask_pred.shape}, min: {mask_pred.min()}, max: {mask_pred.max()}")
                     mask_pred = mask_pred.squeeze().cpu().numpy()
                     save_mask(mask_pred, encounter_id, image_id, os.path.join(output_dir, 'masks_preds'))
                     logger.debug(f"Saved mask for encounter_id: {encounter_id}, image_id: {image_id}")
