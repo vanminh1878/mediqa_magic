@@ -17,7 +17,7 @@ class MediqaSegDataset(Dataset):
         self.data_dir = data_dir
         self.image_dir = os.path.join(data_dir, 'images')
         # Sửa mask_dir để trỏ đến images/masks/{mode}
-        self.mask_dir = os.path.join(data_dir, 'images', 'masks', mode)
+        self.mask_dir = os.path.join(data_dir, 'masks', mode)
         self.mode = mode
         self.transform = transform or transforms.Compose([
             transforms.Resize((256, 256)),
