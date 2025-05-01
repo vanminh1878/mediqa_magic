@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
-def run_seg_inference(data_dir, query_file, output_dir, mode='test'):
+def run_seg_inference(data_dir, query_file, output_dir, mode='val'):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(os.path.join(output_dir, 'masks_preds'), exist_ok=True)
 
@@ -77,6 +77,6 @@ def run_seg_inference(data_dir, query_file, output_dir, mode='test'):
 
 if __name__ == "__main__":
     data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
-    query_file = "/kaggle/input/mediqa-data/mediqa-data/test.json"
+    query_file = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
     output_dir = "/kaggle/working/output/"
     run_seg_inference(data_dir, query_file, output_dir)
