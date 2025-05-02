@@ -33,13 +33,19 @@ class MediQAQADataset(Dataset):
         query = f"{item['query_title_en']} {item['query_content_en']}"
         
         # Chọn ảnh đầu tiên
-        img_id = item['image_ids'][0]
-        img_path = os.path.join(self.image_dir, img_id)
-        image = Image.open(img_path).convert('RGB')
+        img_id = item['image_ids'][0] if item['image_ids'] else None
+        img_path = os.path.join(self.image_dir, img_id) if img_id else None
+        
+        # Kiểm tra tệp tồn tại
+        try:
+            image = Image.open(img_path).convert('RGB')
+        except (FileNotFoundError, TypeError):
+            print(f"Error: Image not found for encounter {encounter_id} at {img_path}. Using default image.")
+            image = Image.new('RGB', (224, 224), color='gray')  # Ảnh trống
         
         # Load mask nếu có
-        mask_path = os.path.join(self.mask_dir, img_id.replace('.jpg', '_mask.png'))
-        mask = Image.open(mask_path).convert('L') if os.path.exists(mask_path) else None
+        mask_path = os.path.join(self.mask_dir, img_id.replace('.jpg', '_mask.png')) if img_id else None
+        mask = Image.open(mask_path).convert('L') if mask_path and os.path.exists(mask_path) else None
         
         if self.transform:
             image = self.transform(image)
@@ -47,7 +53,7 @@ class MediQAQADataset(Dataset):
         # Câu hỏi mở
         response = item['responses'][0]['content_en'] if 'responses' in item else ""
         
-        # Câu hỏi đóng (giả sử ánh xạ từ query/response)
+        # Câu hỏi đóng
         closed_qa = {}
         if 'query_content_en' in item:
             if 'thigh' in item['query_content_en'].lower():
@@ -91,12 +97,12 @@ def inference_qa(split='valid'):
     
     # QA mở
     model = BlipForConditionalGeneration.from_pretrained('Salesforce/blip-image-captioning-base').cuda()
-    model.load_state_dict(torch.load("/kaggle/working/blip_med.pth"))
+    model.load_state_dict(torch.load("/kaggle/working/blip_med.pth", weights_only=True))
     tokenizer = AutoTokenizer.from_pretrained('Salesforce/blip-image-captioning-base')
     
     # QA đóng
     closed_model = ClosedQAModel().cuda()
-    closed_model.load_state_dict(torch.load("/kaggle/working/closed_qa.pth"))
+    closed_model.load_state_dict(torch.load("/kaggle/working/closed_qa.pth", weights_only=True))
     
     results_open = []
     results_closed = []
@@ -110,13 +116,14 @@ def inference_qa(split='valid'):
             queries = batch['query']
             
             # QA mở
-            inputs = tokenizer(queries, return_tensors='pt', padding=True, truncation=True).to('cuda')
+            inputs = tokenizer(queries, return_tensors='pt', padding=True, truncation=True, max_length=512).to('cuda')
+            print(f"Input IDs length for {encounter_id}: {inputs['input_ids'].shape[1]}")  # Debug
             inputs['pixel_values'] = images
-            outputs = model.generate(**inputs, max_length=200)
+            outputs = model.generate(**inputs, max_new_tokens=200)  # Sử dụng max_new_tokens
             response = tokenizer.decode(outputs[0], skip_special_tokens=True)
             
             # QA đóng
-            tokenized_queries = tokenizer(queries, return_tensors='pt', padding=True, truncation=True).to('cuda')
+            tokenized_queries = tokenizer(queries, return_tensors='pt', padding=True, truncation=True, max_length=512).to('cuda')
             closed_outputs = closed_model(images, tokenized_queries)
             closed_pred = torch.argmax(closed_outputs, dim=1).item()
             
