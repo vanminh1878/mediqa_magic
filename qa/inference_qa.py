@@ -1,13 +1,17 @@
 import json
 import os
 import torch
+import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import LlavaForConditionalGeneration, AutoTokenizer, AutoModel
+from transformers import BlipForConditionalGeneration, AutoTokenizer, AutoModel
 import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
-import torch.nn as nn 
 import timm
+import logging
+
+# Giảm logging chi tiết của Hugging Face
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 # Tích hợp MediQAQADataset trực tiếp
 class MediQAQADataset(Dataset):
@@ -69,10 +73,10 @@ class ClosedQAModel(nn.Module):
         self.fc = nn.Linear(768 + 1000, 9)  # 9 options for CQID011-001
     
     def forward(self, images, queries):
-        img_features = self.vit(images)  # [batch, 1000]
+        img_features = self.vit(images)
         bert_outputs = self.bert(input_ids=queries['input_ids'], attention_mask=queries['attention_mask'])
-        text_features = bert_outputs.pooler_output  # [batch, 768]
-        combined = torch.cat([img_features, text_features], dim=1)  # [batch, 1768]
+        text_features = bert_outputs.pooler_output
+        combined = torch.cat([img_features, text_features], dim=1)
         return self.fc(combined)
 
 def inference_qa(split='valid'):
@@ -86,9 +90,9 @@ def inference_qa(split='valid'):
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
     
     # QA mở
-    model = LlavaForConditionalGeneration.from_pretrained('liuhaotian/llava-v1.5-7b').cuda()
-    model.load_state_dict(torch.load("/kaggle/working/llava_med.pth"))
-    tokenizer = AutoTokenizer.from_pretrained('liuhaotian/llava-v1.5-7b')
+    model = BlipForConditionalGeneration.from_pretrained('Salesforce/blip-image-captioning-base').cuda()
+    model.load_state_dict(torch.load("/kaggle/working/blip_med.pth"))
+    tokenizer = AutoTokenizer.from_pretrained('Salesforce/blip-image-captioning-base')
     
     # QA đóng
     closed_model = ClosedQAModel().cuda()
@@ -100,7 +104,7 @@ def inference_qa(split='valid'):
     model.eval()
     closed_model.eval()
     with torch.no_grad():
-        for batch in tqdm(dataloader):
+        for batch in tqdm(dataloader, desc=f"Inference {split}", leave=True):
             encounter_id = batch['encounter_id'][0]
             images = batch['image'].cuda()
             queries = batch['query']

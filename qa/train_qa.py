@@ -3,11 +3,16 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import LlavaForConditionalGeneration, AutoTokenizer, AutoModel
+from transformers import BlipForConditionalGeneration, AutoTokenizer, AutoModel
 import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
 import timm
+import logging
+from torch.cuda.amp import autocast
+
+# Giảm logging chi tiết của Hugging Face
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 # Tích hợp MediQAQADataset trực tiếp
 class MediQAQADataset(Dataset):
@@ -74,10 +79,10 @@ class ClosedQAModel(nn.Module):
         self.fc = nn.Linear(768 + 1000, 9)  # 9 options for CQID011-001
     
     def forward(self, images, queries):
-        img_features = self.vit(images)  # [batch, 1000]
+        img_features = self.vit(images)
         bert_outputs = self.bert(input_ids=queries['input_ids'], attention_mask=queries['attention_mask'])
-        text_features = bert_outputs.pooler_output  # [batch, 768]
-        combined = torch.cat([img_features, text_features], dim=1)  # [batch, 1768]
+        text_features = bert_outputs.pooler_output
+        combined = torch.cat([img_features, text_features], dim=1)
         return self.fc(combined)
 
 def train_qa():
@@ -88,11 +93,11 @@ def train_qa():
     transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()])
     dataset = MediQAQADataset(query_file, data_dir, split='train', transform=transform)
     synthetic_dataset = MediQAQADataset(synthetic_file, data_dir, split='train', transform=transform)
-    dataloader = DataLoader(dataset + synthetic_dataset, batch_size=4, shuffle=True)
+    dataloader = DataLoader(dataset + synthetic_dataset, batch_size=2, shuffle=True)  # Giảm batch_size
     
-    # QA mở: Fine-tune LLaVA-7B
-    model = LlavaForConditionalGeneration.from_pretrained('liuhaotian/llava-v1.5-7b').cuda()
-    tokenizer = AutoTokenizer.from_pretrained('liuhaotian/llava-v1.5-7b')
+    # QA mở: Fine-tune BLIP
+    model = BlipForConditionalGeneration.from_pretrained('Salesforce/blip-image-captioning-base').cuda()
+    tokenizer = AutoTokenizer.from_pretrained('Salesforce/blip-image-captioning-base')
     
     # QA đóng
     closed_model = ClosedQAModel().cuda()
@@ -102,17 +107,18 @@ def train_qa():
     for epoch in range(3):
         model.train()
         closed_model.train()
-        for batch in tqdm(dataloader):
+        for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}", leave=True):
             images = batch['image'].cuda()
             queries = batch['query']
             responses = batch['response']
             closed_qa_labels = batch['closed_qa']['CQID011-001'].cuda()
             
-            # QA mở: Chuẩn bị input cho LLaVA
-            inputs = tokenizer(queries, return_tensors='pt', padding=True, truncation=True).to('cuda')
-            inputs['pixel_values'] = images
-            outputs = model(**inputs, labels=inputs['input_ids'])
-            loss_open = outputs.loss if outputs.loss is not None else torch.tensor(0.0).cuda()
+            # QA mở: Chuẩn bị input cho BLIP với mixed precision
+            with autocast():
+                inputs = tokenizer(queries, return_tensors='pt', padding=True, truncation=True).to('cuda')
+                inputs['pixel_values'] = images
+                outputs = model(**inputs, labels=inputs['input_ids'])
+                loss_open = outputs.loss if outputs.loss is not None else torch.tensor(0.0).cuda()
             
             # QA đóng
             tokenized_queries = tokenizer(queries, return_tensors='pt', padding=True, truncation=True).to('cuda')
@@ -126,7 +132,7 @@ def train_qa():
         
         print(f"Epoch {epoch+1}, Loss: {loss.item()}")
     
-    torch.save(model.state_dict(), "/kaggle/working/llava_med.pth")
+    torch.save(model.state_dict(), "/kaggle/working/blip_med.pth")
     torch.save(closed_model.state_dict(), "/kaggle/working/closed_qa.pth")
 
 if __name__ == "__main__":
