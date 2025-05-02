@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class BertVQA:
     def __init__(self, bert_model_name="sentence-transformers/all-MiniLM-L6-v2", 
-                 vqa_model_name="Salesforce/blip2-opt-2.7b", device="cuda"):
+                 vqa_model_name="Salesforce/blip2-flan-t5-xl", device="cuda"):
         self.device = device
         
         # Initialize Sentence-Transformers for question mapping
