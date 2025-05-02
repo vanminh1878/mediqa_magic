@@ -3,12 +3,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from data.process_data_qa import MediqaQADataset
-from models.clip_qa import CLIPQA
+from models.bert_vqa import BertVQA
 from tqdm import tqdm
 import logging
 import json
 
-# Thiết lập logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
@@ -18,6 +17,7 @@ def custom_collate_fn(batch):
         return None
     
     images = torch.stack([item['image'] for item in batch])
+    queries = [item['query'] for item in batch]
     prompts = [item['prompt'] for item in batch]
     qids = [item['qid'] for item in batch]
     question_indices = torch.tensor([item['question_index'] for item in batch])
@@ -27,6 +27,7 @@ def custom_collate_fn(batch):
     
     return {
         'image': images,
+        'query': queries,
         'prompt': prompts,
         'qid': qids,
         'question_index': question_indices,
@@ -35,14 +36,14 @@ def custom_collate_fn(batch):
         'image_id': image_ids
     }
 
-def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epochs=1, batch_size=2, lr=1e-5):
+def train_bert(data_dir, train_query_file, valid_query_file, closed_qa_file, epochs=3, batch_size=8, lr=2e-5):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Tải dataset
+    # Load dataset
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.481, 0.457, 0.408], std=[0.269, 0.271, 0.282])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
     train_dataset = MediqaQADataset(data_dir, train_query_file, closed_qa_file, mode='train', transform=transform)
@@ -54,16 +55,16 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=custom_collate_fn)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=custom_collate_fn)
     
-    # Tải mô hình
-    clip_qa = CLIPQA(device=device)
-    model = clip_qa.model
+    # Load model
+    bert_vqa = BertVQA(device=device)
+    model = bert_vqa.bert_model  # Only fine-tune BERT for mapping
     model.train()
     
-    # Loss và optimizer
+    # Loss and optimizer
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     
-    # Tải nhãn ground truth
+    # Load ground truth labels
     with open(train_query_file, 'r') as f:
         train_queries = json.load(f)
     with open(valid_query_file, 'r') as f:
@@ -71,6 +72,11 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
     
     train_labels = {q['encounter_id']: {k: v for k, v in q.items() if k.startswith('CQID')} for q in train_queries}
     valid_labels = {q['encounter_id']: {k: v for k, v in q.items() if k.startswith('CQID')} for q in valid_queries}
+    
+    # Map qids to indices
+    with open(closed_qa_file, 'r') as f:
+        closed_qa_dict = json.load(f)
+    qid_to_idx = {qa['qid']: idx for idx, qa in enumerate(closed_qa_dict)}
     
     best_valid_acc = 0.0
     for epoch in range(epochs):
@@ -86,40 +92,20 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
                     continue
                 
                 try:
-                    images = batch['image'].to(device)
-                    prompts = batch['prompt']
+                    queries = batch['query']
                     qids = batch['qid']
-                    options = batch['options']
                     encounter_ids = batch['encounter_id']
-                    question_indices = batch['question_index'].to(device)
                     
                     optimizer.zero_grad()
                     
-                    batch_size = len(prompts)
-                    all_text_inputs = []
-                    max_options = max(len(opt) for opt in options)
+                    # Encode queries
+                    inputs = model.encode(queries, convert_to_tensor=True, device=device)
                     
-                    for i in range(batch_size):
-                        curr_options = options[i] + [""] * (max_options - len(options[i]))
-                        text_inputs = [prompts[i] + f"\nAnswer: {opt}" for opt in curr_options]
-                        all_text_inputs.extend(text_inputs)
-                    
-                    inputs = clip_qa.processor(
-                        text=all_text_inputs,
-                        images=images.repeat_interleave(max_options, dim=0),
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True
-                    ).to(device)
-                    
-                    outputs = model(**inputs)
-                    logits = outputs.logits_per_image.view(batch_size, max_options)
-                    
-                    # Xử lý nhãn
+                    # Get labels
                     labels = []
                     valid_indices = []
                     for idx, (enc_id, qid) in enumerate(zip(encounter_ids, qids)):
-                        label = train_labels.get(enc_id, {}).get(qid, 0)  # Mặc định là 0
+                        label = train_labels.get(enc_id, {}).get(qid, 0)  # Default to 0
                         if label is None:
                             logger.warning(f"Invalid label for encounter_id: {enc_id}, qid: {qid}. Using default label 0.")
                             label = 0
@@ -133,9 +119,10 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
                     
                     labels = torch.tensor(labels).to(device)
                     if len(valid_indices) < batch_size:
-                        images = images[valid_indices]
-                        logits = logits[valid_indices]
+                        inputs = inputs[valid_indices]
                     
+                    # Forward pass (use embeddings as logits for classification)
+                    logits = model(inputs)  # Assume SentenceTransformer outputs embeddings
                     loss = criterion(logits, labels)
                     loss.backward()
                     optimizer.step()
@@ -159,7 +146,7 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
         epoch_acc = correct / total if total > 0 else 0.0
         logger.info(f"Epoch {epoch+1}/{epochs}, Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.4f}")
         
-        # Đánh giá trên valid
+        # Evaluate on valid
         model.eval()
         valid_correct = 0
         valid_total = 0
@@ -169,36 +156,16 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
                     continue
                 
                 try:
-                    images = batch['image'].to(device)
-                    prompts = batch['prompt']
+                    queries = batch['query']
                     qids = batch['qid']
-                    options = batch['options']
                     encounter_ids = batch['encounter_id']
                     
-                    batch_size = len(prompts)
-                    all_text_inputs = []
-                    max_options = max(len(opt) for opt in options)
-                    
-                    for i in range(batch_size):
-                        curr_options = options[i] + [""] * (max_options - len(options[i]))
-                        text_inputs = [prompts[i] + f"\nAnswer: {opt}" for opt in curr_options]
-                        all_text_inputs.extend(text_inputs)
-                    
-                    inputs = clip_qa.processor(
-                        text=all_text_inputs,
-                        images=images.repeat_interleave(max_options, dim=0),
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True
-                    ).to(device)
-                    
-                    outputs = model(**inputs)
-                    logits = outputs.logits_per_image.view(batch_size, max_options)
+                    inputs = model.encode(queries, convert_to_tensor=True, device=device)
                     
                     labels = []
                     valid_indices = []
                     for idx, (enc_id, qid) in enumerate(zip(encounter_ids, qids)):
-                        label = valid_labels.get(enc_id, {}).get(qid, 0)  # Mặc định là 0
+                        label = valid_labels.get(enc_id, {}).get(qid, 0)  # Default to 0
                         if label is None:
                             logger.warning(f"Invalid label for encounter_id: {enc_id}, qid: {qid}. Using default label 0.")
                             label = 0
@@ -210,8 +177,9 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
                     
                     labels = torch.tensor(labels).to(device)
                     if len(valid_indices) < batch_size:
-                        logits = logits[valid_indices]
+                        inputs = inputs[valid_indices]
                     
+                    logits = model(inputs)
                     preds = logits.argmax(dim=1)
                     valid_correct += (preds == labels).sum().item()
                     valid_total += len(labels)
@@ -224,7 +192,7 @@ def train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file, epo
         
         if valid_acc > best_valid_acc:
             best_valid_acc = valid_acc
-            torch.save(model.state_dict(), '/kaggle/working/clip_model.pth')
+            torch.save(model.state_dict(), '/kaggle/working/bert_model.pth')
             logger.info(f"Saved best model at epoch {epoch+1}")
 
 if __name__ == "__main__":
@@ -232,4 +200,4 @@ if __name__ == "__main__":
     train_query_file = "/kaggle/working/train_cvqa_labeled.json"
     valid_query_file = "/kaggle/working/valid_cvqa_labeled.json"
     closed_qa_file = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
-    train_clip(data_dir, train_query_file, valid_query_file, closed_qa_file)
+    train_bert(data_dir, train_query_file, valid_query_file, closed_qa_file)

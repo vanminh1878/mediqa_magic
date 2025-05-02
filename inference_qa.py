@@ -3,20 +3,19 @@ import json
 import torch
 from torch.utils.data import DataLoader
 from data.process_data_qa import MediqaQADataset
-from models.clip_qa import CLIPQA
+from models.bert_vqa import BertVQA
 from utils.helpers import save_qa_results
 from torchvision import transforms
 from tqdm import tqdm
 import logging
 
-# Thiết lập logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 def post_process_qa_results(qa_results_dict, closed_qa_dict):
-    """Kiểm tra tính nhất quán và gộp câu hỏi lặp"""
+    """Check consistency and handle repeated questions."""
     for enc_id, qid_dict in qa_results_dict.items():
         location_qids = sorted([qid for qid in qid_dict if qid.startswith('CQID011-')])
         if location_qids:
@@ -39,24 +38,22 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Khởi tạo CLIPQA
+    # Initialize BertVQA
     try:
-        clip_qa = CLIPQA(device=device)
-        clip_qa.model.load_state_dict(torch.load('/kaggle/working/clip_model.pth', map_location=device))
-        clip_qa.model.eval()
-        logger.info("CLIPQA model initialized and loaded successfully")
+        bert_vqa = BertVQA(device=device)
+        logger.info("BertVQA model initialized successfully")
     except Exception as e:
-        logger.error(f"Error initializing/loading CLIPQA: {e}")
+        logger.error(f"Error initializing BertVQA: {e}")
         raise
 
-    # Đồng bộ transform
+    # Synchronize transform
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.481, 0.457, 0.408], std=[0.269, 0.271, 0.282])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    # Tải dataset
+    # Load dataset
     try:
         dataset = MediqaQADataset(data_dir, query_file, closed_qa_file, mode=mode, transform=transform)
         logger.info(f"Dataset loaded with {len(dataset)} samples")
@@ -66,7 +63,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
 
-    # Tải test.json để lấy danh sách encounter_id
+    # Load test.json to get encounter_ids
     try:
         with open(query_file, 'r') as f:
             test_queries = json.load(f)
@@ -76,7 +73,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
         logger.error(f"Error loading test.json: {e}")
         raise
 
-    # Tải closed_qa_dict
+    # Load closed_qa_dict
     try:
         with open(closed_qa_file, 'r') as f:
             closed_qa_dict = json.load(f)
@@ -88,22 +85,22 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
     processed_samples = 0
     skipped_samples = []
 
-    # Lặp qua dataloader
+    # Iterate through dataloader
     with tqdm(total=len(dataloader), desc="Running QA inference", unit="sample") as pbar:
         for batch in dataloader:
             try:
                 encounter_id = batch['encounter_id'][0]
                 image_id = batch['image_id'][0]
                 qid = batch['qid'][0]
+                query = batch['query'][0]
                 options = batch['options'][0]
-                prompt = batch['prompt'][0]
                 image = batch['image'].to(device)
                 question_index = batch['question_index'].item()
 
-                # Trả lời câu hỏi
+                # Answer question
                 if qid and options:
                     try:
-                        option_idx = clip_qa.answer_question(image, prompt, options, question_index)
+                        option_idx = bert_vqa.answer_question(image, query, closed_qa_dict, question_index)
                         if option_idx >= 0:
                             if encounter_id not in qa_results_dict:
                                 qa_results_dict[encounter_id] = {}
@@ -122,7 +119,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
                 processed_samples += 1
                 pbar.update(1)
 
-                # Giải phóng bộ nhớ
+                # Free memory
                 del image
                 torch.cuda.empty_cache()
 
@@ -132,7 +129,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
                 pbar.update(1)
                 continue
 
-    # Xử lý các encounter_id bị thiếu
+    # Handle missing encounter_ids
     missing_encounter_ids = all_encounter_ids - set(qa_results_dict.keys())
     for enc_id in missing_encounter_ids:
         logger.warning(f"Missing encounter_id in results: {enc_id}")
@@ -142,13 +139,13 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
     # Post-processing
     qa_results_dict = post_process_qa_results(qa_results_dict, closed_qa_dict)
 
-    # Chuyển thành danh sách
+    # Convert to list
     qa_results = [
         {"encounter_id": enc_id, **qid_dict}
         for enc_id, qid_dict in qa_results_dict.items()
     ]
 
-    # Lưu kết quả
+    # Save results
     output_file = os.path.join(output_dir, 'data_cvqa_sys.json')
     try:
         save_qa_results(qa_results, output_file)
@@ -157,7 +154,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
         logger.error(f"Error saving QA results: {e}")
         raise
 
-    # Báo cáo
+    # Report
     logger.info(f"Processed samples: {processed_samples}")
     if skipped_samples:
         logger.warning(f"Skipped samples: {len(skipped_samples)}")

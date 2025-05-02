@@ -1,9 +1,8 @@
 torch==2.0.1
 torchvision==0.15.2
 transformers==4.44.0
+sentence-transformers==2.2.2
 Pillow==10.0.0
 numpy==1.26.0
 opencv-python==4.8.1.78
 tqdm==4.66.1
-spacy==3.4.4
-scispacy==0.5.1

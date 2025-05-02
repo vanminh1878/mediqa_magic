@@ -6,7 +6,6 @@ from torchvision import transforms
 import torch
 from tqdm import tqdm
 import logging
-from transformers import CLIPProcessor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -19,10 +18,10 @@ class MediqaQADataset(Dataset):
         self.transform = transform or transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.481, 0.457, 0.408], std=[0.269, 0.271, 0.282]),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Chuẩn hóa cho BLIP-2
         ])
-        self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         
+        # Load queries and closed QA definitions
         with open(query_file, 'r') as f:
             self.queries = json.load(f)
         with open(closed_qa_file, 'r') as f:
@@ -32,6 +31,7 @@ class MediqaQADataset(Dataset):
         self.qa_data = []
         self.skipped_samples = []
         
+        # Group questions by parent qid (e.g., CQID011)
         self.qid_groups = {}
         for qa in self.closed_qa_dict:
             qid = qa['qid']
@@ -40,6 +40,7 @@ class MediqaQADataset(Dataset):
                 self.qid_groups[parent_qid] = []
             self.qid_groups[parent_qid].append(qa)
         
+        # Process queries
         with tqdm(total=len(self.queries), desc="Processing queries", unit="query") as pbar:
             for query in self.queries:
                 encounter_id = query.get('encounter_id', '')
@@ -49,12 +50,12 @@ class MediqaQADataset(Dataset):
                     pbar.update(1)
                     continue
                 
+                # Combine title and content
                 query_content = (query.get('query_title_en', '') + " " + query.get('query_content_en', '')).lower().strip()
                 if not query_content:
                     query_content = "skin issue"
                 
-                keywords = query_content
-                
+                # Get image IDs
                 image_ids = []
                 if mode == 'train':
                     for img_file in os.listdir(self.image_dir):
@@ -94,6 +95,7 @@ class MediqaQADataset(Dataset):
                     
                     self.image_files.append(img_path)
                     
+                    # Prepare QA data for each closed question
                     for qa in self.closed_qa_dict:
                         qid = qa['qid']
                         question_text = qa['question_en']
@@ -105,7 +107,6 @@ class MediqaQADataset(Dataset):
                             'encounter_id': encounter_id,
                             'image_id': img_id,
                             'query': query_content,
-                            'keywords': keywords,
                             'qid': qid,
                             'question_index': question_index,
                             'options': options,
@@ -140,21 +141,21 @@ class MediqaQADataset(Dataset):
             logger.error(f"Error loading image {img_path}: {e}")
             transformed_image = torch.zeros(3, 224, 224)
         
-        # Thêm số thứ tự câu hỏi vào prompt để phân biệt CQID011-001, CQID011-002, ...
+        # Prepare prompt for VQA (after mapping)
         question_number = qa_info['qid'].split('-')[1] if '-' in qa_info['qid'] else "1"
         prompt = (
-            f"Context: {qa_info['query']}\n"
-            f"Keywords: {qa_info['keywords']}\n"
             f"Question {qa_info['question_index']} (Number {question_number}): {qa_info['question_text']}\n"
             f"Options: {', '.join([f'{i+1}. {opt}' for i, opt in enumerate(qa_info['options'])])}"
         )
         
         return {
             'image': transformed_image,
-            'prompt': prompt,
+            'query': qa_info['query'],  # For BERT mapping
+            'prompt': prompt,  # For VQA
             'qid': qa_info['qid'],
             'question_index': qa_info['question_index'],
             'options': qa_info['options'],
             'encounter_id': qa_info['encounter_id'],
-            'image_id': qa_info['image_id']
+            'image_id': qa_info['image_id'],
+            'question_text': qa_info['question_text']
         }
