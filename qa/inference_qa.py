@@ -13,7 +13,6 @@ import logging
 # Giảm logging chi tiết của Hugging Face
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
-# Tích hợp MediQAQADataset trực tiếp
 class MediQAQADataset(Dataset):
     def __init__(self, query_file, data_dir, split='valid', transform=None):
         self.data_dir = data_dir
@@ -30,7 +29,11 @@ class MediQAQADataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         encounter_id = item['encounter_id']
-        query = f"{item['query_title_en']} {item['query_content_en']}"
+        query = f"{item['query_title_en']} {item['query_content_en']}"[:200]  # Cắt ngắn query
+        
+        # Kiểm tra query hợp lệ
+        if not query.strip():
+            query = "No query provided"  # Giá trị mặc định nếu query rỗng
         
         # Chọn ảnh đầu tiên
         img_id = item['image_ids'][0] if item['image_ids'] else None
@@ -41,7 +44,7 @@ class MediQAQADataset(Dataset):
             image = Image.open(img_path).convert('RGB')
         except (FileNotFoundError, TypeError):
             print(f"Error: Image not found for encounter {encounter_id} at {img_path}. Using default image.")
-            image = Image.new('RGB', (224, 224), color='gray')  # Ảnh trống
+            image = Image.new('RGB', (224, 224), color='gray')
         
         # Load mask nếu có
         mask_path = os.path.join(self.mask_dir, img_id.replace('.jpg', '_mask.png')) if img_id else None
@@ -50,18 +53,15 @@ class MediQAQADataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        # Câu hỏi mở
         response = item['responses'][0]['content_en'] if 'responses' in item else ""
-        
-        # Câu hỏi đóng
         closed_qa = {}
         if 'query_content_en' in item:
             if 'thigh' in item['query_content_en'].lower():
-                closed_qa['CQID011-001'] = 3  # lower extremities
+                closed_qa['CQID011-001'] = 3
             elif 'palm' in item['query_content_en'].lower():
-                closed_qa['CQID011-001'] = 7  # other (please specify)
+                closed_qa['CQID011-001'] = 7
             else:
-                closed_qa['CQID011-001'] = 8  # Not mentioned
+                closed_qa['CQID011-001'] = 8
         
         return {
             'image': image,
@@ -76,7 +76,7 @@ class ClosedQAModel(nn.Module):
         super(ClosedQAModel, self).__init__()
         self.vit = timm.create_model('vit_base_patch16_224', pretrained=True)
         self.bert = AutoModel.from_pretrained('bert-base-uncased')
-        self.fc = nn.Linear(768 + 1000, 9)  # 9 options for CQID011-001
+        self.fc = nn.Linear(768 + 1000, 9)
     
     def forward(self, images, queries):
         img_features = self.vit(images)
@@ -95,12 +95,10 @@ def inference_qa(split='valid'):
     dataset = MediQAQADataset(query_file, data_dir, split=split, transform=transform)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
     
-    # QA mở
     model = BlipForConditionalGeneration.from_pretrained('Salesforce/blip-image-captioning-base').cuda()
     model.load_state_dict(torch.load("/kaggle/working/blip_med.pth", weights_only=True))
     tokenizer = AutoTokenizer.from_pretrained('Salesforce/blip-image-captioning-base')
     
-    # QA đóng
     closed_model = ClosedQAModel().cuda()
     closed_model.load_state_dict(torch.load("/kaggle/working/closed_qa.pth", weights_only=True))
     
@@ -110,16 +108,20 @@ def inference_qa(split='valid'):
     model.eval()
     closed_model.eval()
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc=f"Inference {split}", leave=True):
+        for batch in tqdm(dataloader, desc=f"Inference {split}", leave=True, ncols=100):
             encounter_id = batch['encounter_id'][0]
             images = batch['image'].cuda()
             queries = batch['query']
             
             # QA mở
             inputs = tokenizer(queries, return_tensors='pt', padding=True, truncation=True, max_length=512).to('cuda')
-            print(f"Input IDs length for {encounter_id}: {inputs['input_ids'].shape[1]}")  # Debug
+            input_ids_len = inputs['input_ids'].shape[1]
+            print(f"Input IDs length for {encounter_id}: {input_ids_len}")
+            if input_ids_len == 0:
+                print(f"Skipping {encounter_id}: Empty input_ids")
+                continue
             inputs['pixel_values'] = images
-            outputs = model.generate(**inputs, max_new_tokens=200)  # Sử dụng max_new_tokens
+            outputs = model.generate(**inputs, max_new_tokens=200)
             response = tokenizer.decode(outputs[0], skip_special_tokens=True)
             
             # QA đóng
