@@ -67,7 +67,7 @@ def load_closed_questions(closed_qa_file):
         return json.load(f)
 
 class ClosedQAModel(nn.Module):
-    def __integrate__(self):
+    def __init__(self):
         super(ClosedQAModel, self).__init__()
         self.vit = timm.create_model('vit_base_patch16_224', pretrained=True)
         self.bert = AutoModelForCausalLM.from_pretrained('bert-base-uncased')
@@ -87,18 +87,18 @@ def train_qa():
     transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()])
     dataset = MediQAQADataset(query_file, data_dir, split='train', transform=transform)
     synthetic_dataset = MediQAQADataset(synthetic_file, data_dir, split='train', transform=transform)
-    dataloader = DataLoader(dataset + synthetic_dataset, batch_size=8, shuffle=True)
+    dataloader = DataLoader(dataset + synthetic_dataset, batch_size=4, shuffle=True)  # Giảm batch_size
     
-    # QA mở: Fine-tune LLaVA-Med
-    model = AutoModelForCausalLM.from_pretrained('llava-hf/llava-7b-hf').cuda()
-    tokenizer = AutoTokenizer.from_pretrained('llava-hf/llava-7b-hf')
+    # QA mở: Fine-tune LLaVA-7B
+    model = AutoModelForCausalLM.from_pretrained('liuhaotian/llava-v1.5-7b').cuda()
+    tokenizer = AutoTokenizer.from_pretrained('liuhaotian/llava-v1.5-7b')
     
     # QA đóng
     closed_model = ClosedQAModel().cuda()
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(model.parameters()) + list(closed_model.parameters()), lr=1e-4)
     
-    for epoch in range(5):
+    for epoch in range(3):  # Giảm số epoch
         model.train()
         closed_model.train()
         for batch in tqdm(dataloader):

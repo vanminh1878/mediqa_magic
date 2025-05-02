@@ -71,9 +71,9 @@ def inference_qa(split='valid'):
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
     
     # QA mở
-    model = AutoModelForCausalLM.from_pretrained('llava-hf/llava-7b-hf').cuda()
+    model = AutoModelForCausalLM.from_pretrained('liuhaotian/llava-v1.5-7b').cuda()
     model.load_state_dict(torch.load("/kaggle/working/llava_med.pth"))
-    tokenizer = AutoTokenizer.from_pretrained('llava-hf/llava-7b-hf')
+    tokenizer = AutoTokenizer.from_pretrained('liuhaotian/llava-v1.5-7b')
     
     # QA đóng
     closed_model = ClosedQAModel().cuda()
