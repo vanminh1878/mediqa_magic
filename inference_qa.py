@@ -90,6 +90,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
         with open(closed_qa_file, 'r') as f:
             closed_qa_dict = json.load(f)
         logger.info(f"Closed QA dict loaded with {len(closed_qa_dict)} questions")
+        qid_to_options = {qa['qid']: qa['options_en'] for qa in closed_qa_dict}
     except Exception as e:
         logger.error(f"Error loading closed_qa_file: {e}")
         raise
@@ -113,24 +114,31 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
                 # Log batch info
                 logger.debug(f"Processing: encounter_id={encounter_id}, image_id={image_id}, qid={qid}, query={query}, options={options}")
 
+                # Fix options if invalid
+                if not (qid and options and isinstance(options, list) and len(options) > 0):
+                    if qid in qid_to_options:
+                        options = qid_to_options[qid]
+                        logger.warning(f"Fixed options for qid={qid}: {options}")
+                    else:
+                        logger.warning(f"Skipping QA for encounter_id={encounter_id}, qid={qid}, query={query}, options={options}")
+                        skipped_samples.append((encounter_id, image_id, f"Missing qid or options: qid={qid}, options={options}"))
+                        pbar.update(1)
+                        continue
+
                 # Answer question
-                if qid and options and isinstance(options, list) and len(options) > 0:
-                    try:
-                        option_idx = bert_vqa.answer_question(image, query, closed_qa_dict, question_index)
-                        if option_idx >= 0:
-                            if encounter_id not in qa_results_dict:
-                                qa_results_dict[encounter_id] = {}
-                            qa_results_dict[encounter_id][qid] = option_idx
-                            logger.debug(f"QA result: encounter_id={encounter_id}, qid={qid}, option_idx={option_idx}")
-                        else:
-                            logger.warning(f"Invalid option_idx for encounter_id={encounter_id}, qid={qid}, query={query}, options={options}")
-                            skipped_samples.append((encounter_id, image_id, f"Invalid option_idx for qid={qid}"))
-                    except Exception as e:
-                        logger.warning(f"Error answering question for encounter_id={encounter_id}, qid={qid}, query={query}, error={e}")
-                        skipped_samples.append((encounter_id, image_id, f"QA error: {e}"))
-                else:
-                    logger.warning(f"Skipping QA for encounter_id={encounter_id}, qid={qid}, query={query}, options={options}")
-                    skipped_samples.append((encounter_id, image_id, f"Missing qid or options: qid={qid}, options={options}"))
+                try:
+                    option_idx = bert_vqa.answer_question(image, query, closed_qa_dict, question_index)
+                    if option_idx >= 0:
+                        if encounter_id not in qa_results_dict:
+                            qa_results_dict[encounter_id] = {}
+                        qa_results_dict[encounter_id][qid] = option_idx
+                        logger.debug(f"QA result: encounter_id={encounter_id}, qid={qid}, option_idx={option_idx}")
+                    else:
+                        logger.warning(f"Invalid option_idx for encounter_id={encounter_id}, qid={qid}, query={query}, options={options}")
+                        skipped_samples.append((encounter_id, image_id, f"Invalid option_idx for qid={qid}"))
+                except Exception as e:
+                    logger.warning(f"Error answering question for encounter_id={encounter_id}, qid={qid}, query={query}, error={e}")
+                    skipped_samples.append((encounter_id, image_id, f"QA error: {e}"))
 
                 processed_samples += 1
                 pbar.update(1)
@@ -158,7 +166,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
     # Convert to list
     qa_results = [
         {"encounter_id": enc_id, **qid_dict}
-        for enc_id, qid_dict in sorted(qa_results_dict.items())  # Sort for consistency
+        for enc_id, qid_dict in sorted(qa_results_dict.items())
     ]
 
     # Save results
