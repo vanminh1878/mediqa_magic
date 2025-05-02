@@ -3,7 +3,7 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import LlavaForConditionalGeneration, AutoTokenizer, AutoModel
 import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
@@ -70,13 +70,14 @@ class ClosedQAModel(nn.Module):
     def __init__(self):
         super(ClosedQAModel, self).__init__()
         self.vit = timm.create_model('vit_base_patch16_224', pretrained=True)
-        self.bert = AutoModelForCausalLM.from_pretrained('bert-base-uncased')
+        self.bert = AutoModel.from_pretrained('bert-base-uncased')
         self.fc = nn.Linear(768 + 1000, 9)  # 9 options for CQID011-001
     
     def forward(self, images, queries):
-        img_features = self.vit(images)
-        text_features = self.bert(input_ids=queries['input_ids'], attention_mask=queries['attention_mask']).logits[:, 0, :]
-        combined = torch.cat([img_features, text_features], dim=1)
+        img_features = self.vit(images)  # [batch, 1000]
+        bert_outputs = self.bert(input_ids=queries['input_ids'], attention_mask=queries['attention_mask'])
+        text_features = bert_outputs.pooler_output  # [batch, 768]
+        combined = torch.cat([img_features, text_features], dim=1)  # [batch, 1768]
         return self.fc(combined)
 
 def train_qa():
@@ -87,10 +88,10 @@ def train_qa():
     transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()])
     dataset = MediQAQADataset(query_file, data_dir, split='train', transform=transform)
     synthetic_dataset = MediQAQADataset(synthetic_file, data_dir, split='train', transform=transform)
-    dataloader = DataLoader(dataset + synthetic_dataset, batch_size=4, shuffle=True)  # Giảm batch_size
+    dataloader = DataLoader(dataset + synthetic_dataset, batch_size=4, shuffle=True)
     
     # QA mở: Fine-tune LLaVA-7B
-    model = AutoModelForCausalLM.from_pretrained('liuhaotian/llava-v1.5-7b').cuda()
+    model = LlavaForConditionalGeneration.from_pretrained('liuhaotian/llava-v1.5-7b').cuda()
     tokenizer = AutoTokenizer.from_pretrained('liuhaotian/llava-v1.5-7b')
     
     # QA đóng
@@ -98,7 +99,7 @@ def train_qa():
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(model.parameters()) + list(closed_model.parameters()), lr=1e-4)
     
-    for epoch in range(3):  # Giảm số epoch
+    for epoch in range(3):
         model.train()
         closed_model.train()
         for batch in tqdm(dataloader):
@@ -107,9 +108,10 @@ def train_qa():
             responses = batch['response']
             closed_qa_labels = batch['closed_qa']['CQID011-001'].cuda()
             
-            # QA mở
-            inputs = tokenizer([q + r for q, r in zip(queries, responses)], return_tensors='pt', padding=True, truncation=True).to('cuda')
-            outputs = model(**inputs)
+            # QA mở: Chuẩn bị input cho LLaVA
+            inputs = tokenizer(queries, return_tensors='pt', padding=True, truncation=True).to('cuda')
+            inputs['pixel_values'] = images
+            outputs = model(**inputs, labels=inputs['input_ids'])
             loss_open = outputs.loss if outputs.loss is not None else torch.tensor(0.0).cuda()
             
             # QA đóng
