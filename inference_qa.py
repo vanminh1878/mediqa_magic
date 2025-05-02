@@ -9,16 +9,21 @@ from torchvision import transforms
 from tqdm import tqdm
 import logging
 
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Disable Hugging Face progress bars
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+# Disable sentence-transformers logging
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
 def post_process_qa_results(qa_results_dict, closed_qa_dict):
     """Check consistency and handle repeated questions."""
     for enc_id, qid_dict in qa_results_dict.items():
         location_qids = sorted([qid for qid in qid_dict if qid.startswith('CQID011-')])
         if location_qids:
+            # Find 'Not mentioned' index for CQID011
             not_mentioned_idx = len(closed_qa_dict[[qa['qid'] for qa in closed_qa_dict].index(location_qids[0])]['options_en']) - 1
             selected_locations = [qid for qid in location_qids if qid_dict[qid] != not_mentioned_idx]
             for i, qid in enumerate(location_qids):
@@ -26,6 +31,7 @@ def post_process_qa_results(qa_results_dict, closed_qa_dict):
                     qid_dict[qid] = not_mentioned_idx
                     logger.info(f"Set {qid} to 'Not mentioned' for encounter_id {enc_id}")
             
+            # Update CQID010-001 if necessary
             if 'CQID010-001' in qid_dict and selected_locations:
                 not_mentioned_idx_010 = len(closed_qa_dict[[qa['qid'] for qa in closed_qa_dict].index('CQID010-001')]['options_en']) - 1
                 if qid_dict['CQID010-001'] == not_mentioned_idx_010:
@@ -63,14 +69,14 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
 
-    # Load test.json to get encounter_ids
+    # Load query file to get encounter_ids
     try:
         with open(query_file, 'r') as f:
-            test_queries = json.load(f)
-        all_encounter_ids = set(query.get('encounter_id', '') for query in test_queries if query.get('encounter_id'))
-        logger.info(f"Total encounter_ids in test.json: {len(all_encounter_ids)}")
+            queries = json.load(f)
+        all_encounter_ids = set(query.get('encounter_id', '') for query in queries if query.get('encounter_id'))
+        logger.info(f"Total encounter_ids in {mode}.json: {len(all_encounter_ids)}")
     except Exception as e:
-        logger.error(f"Error loading test.json: {e}")
+        logger.error(f"Error loading {mode}.json: {e}")
         raise
 
     # Load closed_qa_dict
@@ -86,7 +92,7 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
     skipped_samples = []
 
     # Iterate through dataloader
-    with tqdm(total=len(dataloader), desc="Running QA inference", unit="sample") as pbar:
+    with tqdm(total=len(dataloader), desc=f"Running QA inference ({mode})", unit="sample") as pbar:
         for batch in dataloader:
             try:
                 encounter_id = batch['encounter_id'][0]
@@ -113,8 +119,8 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
                         logger.warning(f"Error answering question for encounter_id: {encounter_id}, qid: {qid}, error: {e}")
                         skipped_samples.append((encounter_id, image_id, f"QA error: {e}"))
                 else:
-                    logger.warning(f"Skipping QA for encounter_id: {encounter_id}, qid: {qid}")
-                    skipped_samples.append((encounter_id, image_id, "Missing qid or options"))
+                    logger.warning(f"Skipping QA for encounter_id: {encounter_id}, qid: {qid}, query: {query}")
+                    skipped_samples.append((encounter_id, image_id, f"Missing qid or options: qid={qid}, options={options}"))
 
                 processed_samples += 1
                 pbar.update(1)
@@ -146,8 +152,9 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
     ]
 
     # Save results
-    output_file = os.path.join(output_dir, 'data_cvqa_sys.json')
+    output_file = os.path.join(output_dir, f'data_cvqa_sys_{mode}.json')
     try:
+        logger.info(f"QA results before saving: {qa_results[:5]}...")  # Log 5 results đầu tiên
         save_qa_results(qa_results, output_file)
         logger.info(f"QA results saved to {output_file}")
     except Exception as e:
@@ -163,7 +170,13 @@ def run_qa_inference(data_dir, query_file, closed_qa_file, output_dir, mode='tes
 
 if __name__ == "__main__":
     data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
-    query_file = "/kaggle/input/mediqa-data/mediqa-data/test.json"
     closed_qa_file = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
     output_dir = "/kaggle/working/output/"
-    run_qa_inference(data_dir, query_file, closed_qa_file, output_dir)
+
+    # Run for test
+    query_file_test = "/kaggle/input/mediqa-data/mediqa-data/test.json"
+    run_qa_inference(data_dir, query_file_test, closed_qa_file, output_dir, mode='test')
+
+    # Run for valid
+    query_file_valid = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
+    run_qa_inference(data_dir, query_file_valid, closed_qa_file, output_dir, mode='valid')

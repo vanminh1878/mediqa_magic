@@ -39,18 +39,11 @@ class BertVQA:
 
     def map_query_to_question(self, query, closed_qa_dict):
         """Map query to the most relevant question using cosine similarity."""
-        # Encode query
         query_embedding = self.bert_model.encode(query, convert_to_tensor=True, device=self.device)
-        
-        # Encode all questions
         question_texts = [qa['question_en'] for qa in closed_qa_dict]
         question_embeddings = self.bert_model.encode(question_texts, convert_to_tensor=True, device=self.device)
-        
-        # Compute cosine similarity
         similarities = util.cos_sim(query_embedding, question_embeddings)[0]
         best_idx = similarities.argmax().item()
-        
-        # Get the mapped question
         mapped_qa = closed_qa_dict[best_idx]
         logger.info(f"Mapped query: {query[:50]}... to question: {mapped_qa['question_en']}")
         return mapped_qa
@@ -68,7 +61,7 @@ class BertVQA:
         options = [str(opt) for opt in mapped_qa['options_en'] if opt]
         
         if not options:
-            logger.warning("No valid options for mapped question")
+            logger.warning(f"No valid options for mapped question: {qid}")
             return -1
         
         # Prepare prompt for VQA
@@ -84,14 +77,14 @@ class BertVQA:
         # Generate answer
         try:
             with torch.no_grad():
-                outputs = self.vqa_model.generate(**inputs)
+                outputs = self.vqa_model.generate(**inputs, max_length=50, num_beams=5)
         except Exception as e:
             logger.error(f"Error generating answer with BLIP: {e}")
             return -1
         
         # Decode generated text
         try:
-            generated_text = self.vqa_processor.decode(outputs[0], skip_special_tokens=True).lower()
+            generated_text = self.vqa_processor.decode(outputs[0], skip_special_tokens=True).lower().strip()
         except Exception as e:
             logger.error(f"Error decoding BLIP output: {e}")
             return -1
@@ -99,11 +92,18 @@ class BertVQA:
         # Match generated text to options
         option_idx = -1
         for i, opt in enumerate(options):
-            if opt.lower() in generated_text or str(i+1) in generated_text:
+            opt_lower = opt.lower().strip()
+            # Kiểm tra cả option và số thứ tự
+            if opt_lower in generated_text or str(i+1) in generated_text:
                 option_idx = i
                 break
+            # Kiểm tra khớp gần đúng (cho các trường hợp BLIP trả lời không chính xác)
+            for word in opt_lower.split():
+                if word in generated_text and len(word) > 3:  # Chỉ tính từ dài hơn 3 ký tự
+                    option_idx = i
+                    break
         
-        # Fallback for repeated questions (e.g., CQID011-002)
+        # Fallback for repeated questions
         if question_index > 1 and any(qid.startswith(prefix) for prefix in ['CQID011', 'CQID012', 'CQID020']):
             not_mentioned_idx = next((i for i, opt in enumerate(options) if "not mentioned" in opt.lower()), -1)
             if not_mentioned_idx != -1 and option_idx == -1:
