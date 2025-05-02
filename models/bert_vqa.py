@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoProcessor, Blip2ForConditionalGeneration
+from transformers import BlipProcessor, BlipForQuestionAnswering
 from sentence_transformers import SentenceTransformer, util
 import logging
 
@@ -8,18 +8,34 @@ logger = logging.getLogger(__name__)
 
 class BertVQA:
     def __init__(self, bert_model_name="sentence-transformers/all-MiniLM-L6-v2", 
-                 vqa_model_name="Salesforce/blip2-flan-t5-xl", device="cuda"):
+                 vqa_model_name="Salesforce/blip-vqa-base", device="cuda"):
         self.device = device
         
         # Initialize Sentence-Transformers for question mapping
-        self.bert_model = SentenceTransformer(bert_model_name).to(device)
-        logger.info("Sentence-Transformers model initialized")
+        try:
+            self.bert_model = SentenceTransformer(bert_model_name).to(device)
+            logger.info("Sentence-Transformers model initialized")
+        except Exception as e:
+            logger.error(f"Error loading Sentence-Transformers: {e}")
+            raise
         
-        # Initialize BLIP-2 for VQA
-        self.vqa_processor = AutoProcessor.from_pretrained(vqa_model_name)
-        self.vqa_model = Blip2ForConditionalGeneration.from_pretrained(vqa_model_name, torch_dtype=torch.float16).to(device)
-        self.vqa_model.eval()
-        logger.info("BLIP-2 VQA model initialized")
+        # Initialize BLIP for VQA
+        try:
+            logger.info(f"Loading BLIP processor for {vqa_model_name}")
+            self.vqa_processor = BlipProcessor.from_pretrained(vqa_model_name)
+            logger.info("BLIP processor loaded successfully")
+        except Exception as e:
+            logger.error(f"Error loading BLIP processor: {e}")
+            raise
+        
+        try:
+            logger.info(f"Loading BLIP model for {vqa_model_name}")
+            self.vqa_model = BlipForQuestionAnswering.from_pretrained(vqa_model_name, torch_dtype=torch.float16).to(device)
+            self.vqa_model.eval()
+            logger.info("BLIP model initialized")
+        except Exception as e:
+            logger.error(f"Error loading BLIP model: {e}")
+            raise
 
     def map_query_to_question(self, query, closed_qa_dict):
         """Map query to the most relevant question using cosine similarity."""
@@ -58,15 +74,27 @@ class BertVQA:
         # Prepare prompt for VQA
         prompt = f"Question: {question_text}\nOptions: {', '.join([f'{i+1}. {opt}' for i, opt in enumerate(options)])}"
         
-        # Process inputs for BLIP-2
-        inputs = self.vqa_processor(images=image, text=prompt, return_tensors="pt").to(self.device, torch.float16)
+        # Process inputs for BLIP
+        try:
+            inputs = self.vqa_processor(images=image, text=prompt, return_tensors="pt").to(self.device, torch.float16)
+        except Exception as e:
+            logger.error(f"Error processing inputs for BLIP: {e}")
+            return -1
         
         # Generate answer
-        with torch.no_grad():
-            outputs = self.vqa_model.generate(**inputs)
+        try:
+            with torch.no_grad():
+                outputs = self.vqa_model.generate(**inputs)
+        except Exception as e:
+            logger.error(f"Error generating answer with BLIP: {e}")
+            return -1
         
         # Decode generated text
-        generated_text = self.vqa_processor.decode(outputs[0], skip_special_tokens=True).lower()
+        try:
+            generated_text = self.vqa_processor.decode(outputs[0], skip_special_tokens=True).lower()
+        except Exception as e:
+            logger.error(f"Error decoding BLIP output: {e}")
+            return -1
         
         # Match generated text to options
         option_idx = -1
