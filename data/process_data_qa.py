@@ -167,10 +167,18 @@ class MediqaQADataset(Dataset):
         logger.info(f"Total QA entries: {len(self.qa_data)}")
         if self.skipped_samples:
             logger.warning(f"Skipped samples: {len(self.skipped_samples)}")
-            with open(os.path.join(data_dir, f'skipped_samples_init_{mode}.txt'), 'w') as f:
+            # Đặt đường dẫn ghi tệp vào /kaggle/working/
+            output_dir = "/kaggle/working/"
+            skipped_samples_file = os.path.join(output_dir, f'skipped_samples_init_{mode}.txt')
+            
+            # Đảm bảo thư mục tồn tại
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Ghi đè tệp (tạo mới nếu chưa có)
+            with open(skipped_samples_file, 'w') as f:
                 for enc_id, reason in self.skipped_samples:
                     f.write(f"Skipped encounter_id={enc_id}, reason={reason}\n")
-            logger.info(f"Skipped samples saved to {data_dir}/skipped_samples_init_{mode}.txt")
+            logger.info(f"Skipped samples saved to {skipped_samples_file}")
         if not self.qa_data:
             logger.error("No valid QA samples generated. Check data consistency.")
             raise ValueError("No valid QA samples generated")
