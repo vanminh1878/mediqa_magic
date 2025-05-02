@@ -1,3 +1,7 @@
+import sys
+import os
+# Thêm đường dẫn thư mục hiện tại để import module qa
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
