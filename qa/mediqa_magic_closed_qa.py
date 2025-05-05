@@ -12,7 +12,7 @@ import pandas as pd
 
 # Cấu hình
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-API_KEY = "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"
+API_KEY = "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"
 IMAGE_DIR = "/kaggle/input/mediqa-data/mediqa-data/images"
 QUESTION_FILE = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
 VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
