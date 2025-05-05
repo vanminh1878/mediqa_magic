@@ -168,7 +168,7 @@ def inference_closed_qa(split='valid'):
     
     model.eval()
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc=f"Inference {split}", leave=True, ncols=100):
+        for batch in tqdm(dataloader, desc=f"Inference {split}", leave=False, ncols=100):
             encounter_id = batch['encounter_id'][0]
             images = batch['images'].cuda()  # Shape: (1, num_images, 3, 224, 224)
             queries = batch['query']
@@ -182,8 +182,8 @@ def inference_closed_qa(split='valid'):
             for qid in model.qids:
                 pred = torch.argmax(outputs[qid], dim=1).item()
                 # Combine CLIP prediction with BERT if BERT provides a non-"Not mentioned" label
-                bert_label = closed_qa_bert[qid][0] if qid in closed_qa_bert else None
-                if bert_label is not None and bert_label != (
+                bert_label = closed_qa_bert[qid] if qid in closed_qa_bert else None
+                if bert_label is not None and isinstance(bert_label, int) and bert_label != (
                     3 if qid.startswith('CQID012') else
                     9 if qid.startswith('CQID020') else
                     7 if qid.startswith('CQID011') else
