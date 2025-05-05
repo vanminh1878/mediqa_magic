@@ -16,6 +16,23 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=7.0, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+    
+    def forward(self, inputs, targets):
+        ce_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        return focal_loss
+
 class MediQAQADataset(Dataset):
     def __init__(self, query_file, data_dir, split='train', transform=None, bert_model_dir="/kaggle/working/bert_models"):
         self.data_dir = data_dir
@@ -30,7 +47,6 @@ class MediQAQADataset(Dataset):
         with open('/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json', 'r') as f:
             self.q_definitions = json.load(f)
         
-        self.qid_to_options = {q['qid']: q['options_en'] for q in self.q_definitions}
         self.qids = [
             'CQID010-001', 'CQID011-001', 'CQID011-002', 'CQID011-003', 
             'CQID011-004', 'CQID011-005', 'CQID011-006', 'CQID012-001', 
@@ -40,7 +56,6 @@ class MediQAQADataset(Dataset):
             'CQID020-007', 'CQID020-008', 'CQID020-009', 'CQID025-001', 
             'CQID034-001', 'CQID035-001', 'CQID036-001'
         ]
-        # Load BERT models and tokenizers on CPU
         self.bert_models = {}
         self.bert_tokenizers = {}
         for qid in self.qids:
@@ -58,23 +73,34 @@ class MediQAQADataset(Dataset):
         if not query.strip():
             query = "No query provided"
         
-        img_id = item['image_ids'][0] if item['image_ids'] else None
-        img_path = os.path.join(self.image_dir, img_id) if img_id else None
-        try:
-            image = Image.open(img_path).convert('RGB')
-        except (FileNotFoundError, TypeError):
-            print(f"Error: Image not found for encounter {encounter_id}. Using default image.")
-            image = Image.new('RGB', (224, 224), color='gray')
+        images = []
+        loaded_image_ids = []
+        for img_id in item.get('image_ids', [])[:3]:  # Limit to 3 images
+            img_path = os.path.join(self.image_dir, img_id)
+            try:
+                image = Image.open(img_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                images.append(image)
+                loaded_image_ids.append(img_id)
+            except (FileNotFoundError, TypeError):
+                print(f"Error: Image {img_path} not found for encounter {encounter_id}. Skipping this image.")
+                continue
         
-        if self.transform:
-            image = self.transform(image)
+        if not images:
+            print(f"Warning: No valid images loaded for encounter {encounter_id}. Using empty image tensor.")
+            images = [torch.zeros(3, 224, 224)]
+        
+        images = torch.stack(images)
         
         closed_qa = item.get('closed_qa', {})
         if not closed_qa:
             closed_qa = self.extract_closed_qa(query)
         
+        print(f"Encounter {encounter_id}: Loaded images {loaded_image_ids}, Query: {query[:100]}...")
+        
         return {
-            'image': image,
+            'images': images,
             'query': query,
             'closed_qa': closed_qa,
             'encounter_id': encounter_id
@@ -90,7 +116,6 @@ class MediQAQADataset(Dataset):
                 inputs = tokenizer(query, return_tensors='pt', padding=True, truncation=True, max_length=128)
                 outputs = model(**inputs)
                 closed_qa[qid] = torch.argmax(outputs.logits, dim=1).item()
-        
         return closed_qa
 
 class ClosedQAModel(nn.Module):
@@ -121,10 +146,18 @@ class ClosedQAModel(nn.Module):
         })
     
     def forward(self, images, queries):
-        outputs = self.clip(pixel_values=images, input_ids=queries['input_ids'], 
-                           attention_mask=queries['attention_mask'])
+        batch_size, num_images, c, h, w = images.shape
+        images = images.view(-1, c, h, w)
+        outputs = self.clip(pixel_values=images, input_ids=queries['input_ids'].repeat(num_images, 1), 
+                           attention_mask=queries['attention_mask'].repeat(num_images, 1))
         img_features = outputs.image_embeds
         text_features = outputs.text_embeds
+        
+        img_features = img_features.view(batch_size, num_images, -1).mean(dim=1)
+        text_features = text_features.view(batch_size, num_images, -1).mean(dim=1)
+        
+        print(f"img_features mean: {img_features.mean().item()}, text_features mean: {text_features.mean().item()}")
+        
         combined = self.dropout(torch.cat([img_features, text_features], dim=1))
         outputs = {qid: fc(combined) for qid, fc in self.fc_layers.items()}
         return outputs
@@ -135,17 +168,16 @@ def evaluate(model, dataloader, processor, criteria):
     all_labels = {qid: [] for qid in model.qids}
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
-            images = batch['image'].cuda()
+            images = batch['images'].cuda()
             queries = batch['query']
             closed_qa = batch['closed_qa']
             inputs = processor(text=queries, images=None, return_tensors='pt', 
                              padding=True, truncation=True, max_length=77).to('cuda')
-            inputs['pixel_values'] = images
             outputs = model(images, inputs)
             for qid in model.qids:
                 if qid in closed_qa and closed_qa[qid] is not None:
                     preds = torch.argmax(outputs[qid], dim=1).cpu().numpy()
-                    labels = [closed_qa[qid][i] for i in range(len(closed_qa[qid]))]
+                    labels = [closed_qa[qid]] * len(preds)  # Repeat label for batch
                     all_preds[qid].extend(preds)
                     all_labels[qid].extend(labels)
     accuracies = {qid: accuracy_score(all_labels[qid], all_preds[qid]) for qid in model.qids if all_labels[qid]}
@@ -175,12 +207,12 @@ def train_closed_qa():
     processor = CLIPProcessor.from_pretrained('openai/clip-vit-base-patch16')
     
     criteria = {
-        4: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 1.0]).cuda()),
-        8: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda()),
-        7: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda()),
-        10: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda()),
-        3: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 1.0]).cuda()),
-        12: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda())
+        4: FocalLoss(alpha=7.0, gamma=2),
+        8: FocalLoss(alpha=7.0, gamma=2),
+        7: FocalLoss(alpha=7.0, gamma=2),
+        10: FocalLoss(alpha=7.0, gamma=2),
+        3: FocalLoss(alpha=7.0, gamma=2),
+        12: FocalLoss(alpha=7.0, gamma=2)
     }
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
@@ -194,8 +226,8 @@ def train_closed_qa():
     for param in model.clip.vision_model.parameters():
         param.requires_grad = False
     
-    for epoch in range(2):
-        if epoch == 5:
+    for epoch in range(20):
+        if epoch == 3:
             for param in model.clip.vision_model.parameters():
                 param.requires_grad = True
             optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0.01)
@@ -203,20 +235,20 @@ def train_closed_qa():
         model.train()
         total_loss = 0
         for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1}", leave=True, ncols=100):
-            images = batch['image'].cuda()
+            images = batch['images'].cuda()
+            batch_size, num_images, c, h, w = images.shape
             queries = batch['query']
             closed_qa = batch['closed_qa']
             
             with autocast():
                 inputs = processor(text=queries, images=None, return_tensors='pt', 
                                  padding=True, truncation=True, max_length=77).to('cuda')
-                inputs['pixel_values'] = images
                 outputs = model(images, inputs)
                 
                 loss = 0
                 for qid in model.qids:
                     if qid in closed_qa and closed_qa[qid] is not None:
-                        labels = torch.tensor([closed_qa[qid][i] for i in range(len(closed_qa[qid]))]).cuda()
+                        labels = torch.tensor([closed_qa[qid]]).cuda()
                         num_classes = (
                             4 if qid.startswith('CQID010') else
                             8 if qid.startswith('CQID011') else

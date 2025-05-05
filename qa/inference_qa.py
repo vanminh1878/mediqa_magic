@@ -36,7 +36,6 @@ class MediQAQADataset(Dataset):
             'CQID020-007', 'CQID020-008', 'CQID020-009', 'CQID025-001', 
             'CQID034-001', 'CQID035-001', 'CQID036-001'
         ]
-        # Load BERT models and tokenizers on CPU
         self.bert_models = {}
         self.bert_tokenizers = {}
         for qid in self.qids:
@@ -54,10 +53,9 @@ class MediQAQADataset(Dataset):
         if not query.strip():
             query = "No query provided"
         
-        # Load all images for the encounter
         images = []
         loaded_image_ids = []
-        for img_id in item.get('image_ids', []):
+        for img_id in item.get('image_ids', [])[:3]:  # Limit to 3 images
             img_path = os.path.join(self.image_dir, img_id)
             try:
                 image = Image.open(img_path).convert('RGB')
@@ -71,15 +69,12 @@ class MediQAQADataset(Dataset):
         
         if not images:
             print(f"Warning: No valid images loaded for encounter {encounter_id}. Using empty image tensor.")
-            images = [torch.zeros(3, 224, 224)]  # Placeholder tensor
+            images = [torch.zeros(3, 224, 224)]
         
-        # Stack images into a tensor
         images = torch.stack(images)
         
-        # Extract closed QA labels using BERT
         closed_qa = self.extract_closed_qa(query)
         
-        # Debug log
         print(f"Encounter {encounter_id}: Loaded images {loaded_image_ids}, Query: {query[:100]}...")
         
         return {
@@ -129,17 +124,17 @@ class ClosedQAModel(nn.Module):
         })
     
     def forward(self, images, queries):
-        # Process multiple images and average their features
         batch_size, num_images, c, h, w = images.shape
-        images = images.view(-1, c, h, w)  # Flatten for CLIP processing
+        images = images.view(-1, c, h, w)
         outputs = self.clip(pixel_values=images, input_ids=queries['input_ids'].repeat(num_images, 1), 
                            attention_mask=queries['attention_mask'].repeat(num_images, 1))
         img_features = outputs.image_embeds
         text_features = outputs.text_embeds
         
-        # Average image features across all images for the encounter
         img_features = img_features.view(batch_size, num_images, -1).mean(dim=1)
         text_features = text_features.view(batch_size, num_images, -1).mean(dim=1)
+        
+        print(f"img_features mean: {img_features.mean().item()}, text_features mean: {text_features.mean().item()}")
         
         combined = self.dropout(torch.cat([img_features, text_features], dim=1))
         outputs = {qid: fc(combined) for qid, fc in self.fc_layers.items()}
@@ -170,7 +165,7 @@ def inference_closed_qa(split='valid'):
     with torch.no_grad():
         for batch in tqdm(dataloader, desc=f"Inference {split}", leave=False, ncols=100):
             encounter_id = batch['encounter_id'][0]
-            images = batch['images'].cuda()  # Shape: (1, num_images, 3, 224, 224)
+            images = batch['images'].cuda()
             queries = batch['query']
             closed_qa_bert = batch['closed_qa']
             
@@ -180,18 +175,25 @@ def inference_closed_qa(split='valid'):
             
             closed_pred = {}
             for qid in model.qids:
-                pred = torch.argmax(outputs[qid], dim=1).item()
-                # Combine CLIP prediction with BERT if BERT provides a non-"Not mentioned" label
+                logits = outputs[qid]
+                probs = torch.softmax(logits, dim=1)
+                pred = torch.argmax(probs, dim=1).item()
+                prob = probs[0, pred].item()
+                
                 bert_label = closed_qa_bert[qid] if qid in closed_qa_bert else None
-                if bert_label is not None and isinstance(bert_label, int) and bert_label != (
+                if qid in ['CQID015-001', 'CQID012-001', 'CQID020-001'] and bert_label is not None and isinstance(bert_label, int):
+                    closed_pred[qid] = bert_label  # Always prioritize BERT for key text-based questions
+                elif bert_label is not None and isinstance(bert_label, int) and bert_label != (
                     3 if qid.startswith('CQID012') else
                     9 if qid.startswith('CQID020') else
                     7 if qid.startswith('CQID011') else
                     2
-                ):
-                    closed_pred[qid] = bert_label  # Prioritize BERT for non-"Not mentioned"
+                ) and prob < 0.9:  # Use BERT if non-"Not mentioned" and CLIP confidence is low
+                    closed_pred[qid] = bert_label
                 else:
-                    closed_pred[qid] = pred  # Use CLIP prediction
+                    closed_pred[qid] = pred
+                
+                print(f"Encounter {encounter_id}: QID {qid}, BERT {bert_label}, CLIP {pred}, Prob {prob:.3f}, Final {closed_pred[qid]}")
             
             results_closed.append({
                 'encounter_id': encounter_id,
