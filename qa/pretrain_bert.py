@@ -27,7 +27,7 @@ class BERTQADataset(Dataset):
             'labels': labels
         }
 
-def train_bert_model(qid, num_labels, train_file, output_dir, epochs=7):
+def train_bert_model(qid, num_labels, train_file, output_dir, epochs=5):
     os.makedirs(output_dir, exist_ok=True)
     dataset = BERTQADataset(train_file, [qid])
     dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
