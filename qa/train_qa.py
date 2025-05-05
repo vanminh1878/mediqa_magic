@@ -24,7 +24,7 @@ class MediQAQADataset(Dataset):
             self.data = json.load(f)
         
         # Load closed questions definitions
-        with open('closedquestions_definitions_imageclef2025.json', 'r') as f:
+        with open('/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json', 'r') as f:
             self.q_definitions = json.load(f)
         
         self.qid_to_options = {q['qid']: q['options_en'] for q in self.q_definitions}
