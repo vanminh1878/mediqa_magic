@@ -2,7 +2,7 @@ import json
 import os
 import random
 
-def generate_synthetic_data(output_file, num_samples=500, image_dir='/kaggle/input/mediqa-data/mediqa-data/images/'):
+def generate_synthetic_data(output_file, num_samples=1500, image_dir='/kaggle/input/mediqa-data/mediqa-data/images/'):
     diseases = ['folliculitis', 'pompholyx', 'psoriasis', 'vitiligo', 'syphilitic rash', 'eczema', 'acne', 'melanoma']
     locations = ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm']
     time_units = ['hour', 'day', 'week', 'month', 'year']
@@ -19,7 +19,7 @@ def generate_synthetic_data(output_file, num_samples=500, image_dir='/kaggle/inp
     synthetic_data = []
     for i in range(num_samples):
         disease = random.choice(diseases)
-        num_locations = random.randint(1, 3)  # Multiple locations for diversity
+        num_locations = random.randint(1, 4)
         selected_locations = random.sample(locations, num_locations)
         time_unit = random.choice(time_units)
         size = random.choice(sizes)
@@ -46,13 +46,25 @@ def generate_synthetic_data(output_file, num_samples=500, image_dir='/kaggle/inp
             'CQID011-001': ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm', 'Not mentioned'].index(selected_locations[0]),
             'CQID011-002': ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm', 'Not mentioned'].index(selected_locations[1]) if len(selected_locations) > 1 else 7,
             'CQID011-003': ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm', 'Not mentioned'].index(selected_locations[2]) if len(selected_locations) > 2 else 7,
-            'CQID011-004': 7, 'CQID011-005': 7, 'CQID011-006': 7,
+            'CQID011-004': ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm', 'Not mentioned'].index(selected_locations[3]) if len(selected_locations) > 3 else 7,
+            'CQID011-005': 7,
+            'CQID011-006': 7,
             'CQID012-001': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(size),
-            'CQID012-002': 3, 'CQID012-003': 3, 'CQID012-004': 3, 'CQID012-005': 3, 'CQID012-006': 3,
+            'CQID012-002': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(random.choice(sizes)) if random.random() > 0.3 else 3,
+            'CQID012-003': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(random.choice(sizes)) if random.random() > 0.5 else 3,
+            'CQID012-004': 3,
+            'CQID012-005': 3,
+            'CQID012-006': 3,
             'CQID015-001': ['hour', 'day', 'week', 'month', 'year', 'years', 'Not mentioned'].index(time_unit if time_unit != 'year' else 'years'),
             'CQID020-001': ['raised', 'flat', 'sunken', 'thick', 'thin', 'warty', 'crust', 'scab', 'weeping', 'bumpy', 'Not mentioned'].index(description),
-            'CQID020-002': 9, 'CQID020-003': 9, 'CQID020-004': 9, 'CQID020-005': 9, 'CQID020-006': 9,
-            'CQID020-007': 9, 'CQID020-008': 9, 'CQID020-009': 9,
+            'CQID020-002': ['raised', 'flat', 'sunken', 'thick', 'thin', 'warty', 'crust', 'scab', 'weeping', 'bumpy', 'Not mentioned'].index(random.choice(descriptions)) if random.random() > 0.3 else 9,
+            'CQID020-003': ['raised', 'flat', 'sunken', 'thick', 'thin', 'warty', 'crust', 'scab', 'weeping', 'bumpy', 'Not mentioned'].index(random.choice(descriptions)) if random.random() > 0.5 else 9,
+            'CQID020-004': 9,
+            'CQID020-005': 9,
+            'CQID020-006': 9,
+            'CQID020-007': 9,
+            'CQID020-008': 9,
+            'CQID020-009': 9,
             'CQID025-001': 0 if is_itchy == 'itchy' else 1,
             'CQID034-001': ['normal', 'pink', 'red', 'brown', 'blue', 'purple', 'black', 'white', 'combination', 'hyperpigmentation', 'hypopigmentation', 'Not mentioned'].index(color),
             'CQID035-001': ['single', 'multiple', 'Not mentioned'].index(lesion_count),

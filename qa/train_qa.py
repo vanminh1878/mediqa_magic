@@ -3,31 +3,47 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import CLIPProcessor, CLIPModel
+from transformers import CLIPProcessor, CLIPModel, DistilBertTokenizer, DistilBertForSequenceClassification
 import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
 import logging
 from torch.cuda.amp import autocast
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from sklearn.metrics import accuracy_score, f1_score
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 class MediQAQADataset(Dataset):
-    def __init__(self, query_file, data_dir, split='train', transform=None):
+    def __init__(self, query_file, data_dir, split='train', transform=None, bert_model_dir="/kaggle/working/bert_models"):
         self.data_dir = data_dir
         self.transform = transform
         self.image_dir = os.path.join(data_dir, 'images')
         self.mask_dir = os.path.join(data_dir, f'masks_{split}')
+        self.bert_model_dir = bert_model_dir
         
         with open(query_file, 'r') as f:
             self.data = json.load(f)
         
-        # Load closed questions definitions
         with open('/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json', 'r') as f:
             self.q_definitions = json.load(f)
         
         self.qid_to_options = {q['qid']: q['options_en'] for q in self.q_definitions}
+        self.qids = [
+            'CQID010-001', 'CQID011-001', 'CQID011-002', 'CQID011-003', 
+            'CQID011-004', 'CQID011-005', 'CQID011-006', 'CQID012-001', 
+            'CQID012-002', 'CQID012-003', 'CQID012-004', 'CQID012-005', 
+            'CQID012-006', 'CQID015-001', 'CQID020-001', 'CQID020-002', 
+            'CQID020-003', 'CQID020-004', 'CQID020-005', 'CQID020-006', 
+            'CQID020-007', 'CQID020-008', 'CQID020-009', 'CQID025-001', 
+            'CQID034-001', 'CQID035-001', 'CQID036-001'
+        ]
+        self.bert_models = {}
+        self.bert_tokenizers = {}
+        for qid in self.qids:
+            self.bert_models[qid] = DistilBertForSequenceClassification.from_pretrained(os.path.join(bert_model_dir, f"bert_{qid}")).cuda()
+            self.bert_tokenizers[qid] = DistilBertTokenizer.from_pretrained(os.path.join(bert_model_dir, f"bert_{qid}"))
     
     def __len__(self):
         return len(self.data)
@@ -51,10 +67,9 @@ class MediQAQADataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        # Ground truth closed QA labels
         closed_qa = item.get('closed_qa', {})
         if not closed_qa:
-            closed_qa = self.extract_closed_qa(item['query_content_en'].lower())
+            closed_qa = self.extract_closed_qa(query)
         
         return {
             'image': image,
@@ -63,103 +78,16 @@ class MediQAQADataset(Dataset):
             'encounter_id': encounter_id
         }
     
-    def extract_closed_qa(self, query_content):
+    def extract_closed_qa(self, query):
         closed_qa = {}
-        
-        # CQID010-001: How much of the body is affected
-        closed_qa['CQID010-001'] = (
-            0 if 'single spot' in query_content or 'single' in query_content else
-            1 if 'limited area' in query_content or 'small area' in query_content else
-            2 if 'widespread' in query_content or 'whole body' in query_content else
-            3
-        )
-        
-        # CQID011-001 to CQID011-006: Where is the affected area
-        locations = ['head', 'neck', 'upper extremities|arm|hand|elbow|wrist', 
-                     'lower extremities|thigh|leg|knee|ankle', 'chest|abdomen|torso', 
-                     'back', 'palm|thumb|finger']
-        found_locations = []
-        for i, qid in enumerate(['CQID011-001', 'CQID011-002', 'CQID011-003', 
-                                'CQID011-004', 'CQID011-005', 'CQID011-006']):
-            if i < len(found_locations):
-                closed_qa[qid] = found_locations[i]
-            else:
-                for j, loc in enumerate(locations):
-                    if any(word in query_content for word in loc.split('|')):
-                        closed_qa[qid] = j
-                        found_locations.append(j)
-                        break
-                else:
-                    closed_qa[qid] = 7
-        
-        # CQID012-001 to CQID012-006: Size of affected areas
-        for i, qid in enumerate(['CQID012-001', 'CQID012-002', 'CQID012-003', 
-                                'CQID012-004', 'CQID012-005', 'CQID012-006']):
-            if i == 0:
-                closed_qa[qid] = (
-                    0 if 'thumb nail' in query_content or 'nail' in query_content else
-                    1 if 'palm' in query_content else
-                    2 if 'large' in query_content or 'cm' in query_content else
-                    3
-                )
-            else:
-                closed_qa[qid] = 3
-        
-        # CQID015-001: Onset
-        times = ['hour', 'day', 'week', 'month', 'year']
-        for i, time in enumerate(times):
-            if time in query_content:
-                closed_qa['CQID015-001'] = i
-                break
-        else:
-            closed_qa['CQID015-001'] = 5 if 'years' in query_content else 6
-        
-        # CQID020-001 to CQID020-009: Skin description
-        descs = ['raised|bumpy|blister', 'flat', 'sunken', 'thick', 'thin', 
-                 'warty', 'crust', 'scab', 'weeping|oozing']
-        for i, qid in enumerate(['CQID020-001', 'CQID020-002', 'CQID020-003', 
-                                'CQID020-004', 'CQID020-005', 'CQID020-006', 
-                                'CQID020-007', 'CQID020-008', 'CQID020-009']):
-            if i == 0:
-                for j, desc in enumerate(descs):
-                    if any(word in query_content for word in desc.split('|')):
-                        closed_qa[qid] = j
-                        break
-                else:
-                    closed_qa[qid] = 9
-            else:
-                closed_qa[qid] = 9
-        
-        # CQID025-001: Itch
-        closed_qa['CQID025-001'] = (
-            0 if 'itch' in query_content or 'itchy' in query_content else
-            1 if 'no itch' in query_content else
-            2
-        )
-        
-        # CQID034-001: Lesion color
-        colors = ['normal', 'pink', 'red', 'brown', 'blue', 'purple', 'black', 
-                  'white', 'combination', 'hyperpigmentation', 'hypopigmentation']
-        for i, color in enumerate(colors):
-            if color in query_content:
-                closed_qa['CQID034-001'] = i
-                break
-        else:
-            closed_qa['CQID034-001'] = 11
-        
-        # CQID035-001: Lesion count
-        closed_qa['CQID035-001'] = (
-            0 if 'single' in query_content else
-            1 if 'multiple' in query_content or 'many' in query_content else
-            2
-        )
-        
-        # CQID036-001: Texture
-        closed_qa['CQID036-001'] = (
-            0 if 'smooth' in query_content else
-            1 if 'rough' in query_content else
-            2
-        )
+        for qid in self.qids:
+            model = self.bert_models[qid]
+            tokenizer = self.bert_tokenizers[qid]
+            model.eval()
+            with torch.no_grad():
+                inputs = tokenizer(query, return_tensors='pt', padding=True, truncation=True, max_length=128).to('cuda')
+                outputs = model(**inputs)
+                closed_qa[qid] = torch.argmax(outputs.logits, dim=1).item()
         
         return closed_qa
 
@@ -193,16 +121,40 @@ class ClosedQAModel(nn.Module):
     def forward(self, images, queries):
         outputs = self.clip(pixel_values=images, input_ids=queries['input_ids'], 
                            attention_mask=queries['attention_mask'])
-        img_features = outputs.image_embeds  # [batch, 512]
-        text_features = outputs.text_embeds  # [batch, 512]
+        img_features = outputs.image_embeds
+        text_features = outputs.text_embeds
         combined = self.dropout(torch.cat([img_features, text_features], dim=1))
         outputs = {qid: fc(combined) for qid, fc in self.fc_layers.items()}
         return outputs
+
+def evaluate(model, dataloader, processor, criteria):
+    model.eval()
+    all_preds = {qid: [] for qid in model.qids}
+    all_labels = {qid: [] for qid in model.qids}
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating"):
+            images = batch['image'].cuda()
+            queries = batch['query']
+            closed_qa = batch['closed_qa']
+            inputs = processor(text=queries, images=None, return_tensors='pt', 
+                             padding=True, truncation=True, max_length=77).to('cuda')
+            inputs['pixel_values'] = images
+            outputs = model(images, inputs)
+            for qid in model.qids:
+                if qid in closed_qa and closed_qa[qid] is not None:
+                    preds = torch.argmax(outputs[qid], dim=1).cpu().numpy()
+                    labels = [closed_qa[qid][i] for i in range(len(closed_qa[qid]))]
+                    all_preds[qid].extend(preds)
+                    all_labels[qid].extend(labels)
+    accuracies = {qid: accuracy_score(all_labels[qid], all_preds[qid]) for qid in model.qids if all_labels[qid]}
+    f1_scores = {qid: f1_score(all_labels[qid], all_preds[qid], average='weighted') for qid in model.qids if all_labels[qid]}
+    return accuracies, f1_scores
 
 def train_closed_qa():
     data_dir = "/kaggle/input/mediqa-data/mediqa-data/"
     query_file = "/kaggle/input/mediqa-data/mediqa-data/train_cvqa.json"
     synthetic_file = "/kaggle/working/synthetic_train.json"
+    valid_file = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
     
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -210,30 +162,45 @@ def train_closed_qa():
         transforms.Normalize(mean=[0.481, 0.457, 0.408], std=[0.269, 0.261, 0.276])
     ])
     
-    dataset = MediQAQADataset(query_file, data_dir, split='train', transform=transform)
+    train_dataset = MediQAQADataset(query_file, data_dir, split='train', transform=transform)
     synthetic_dataset = MediQAQADataset(synthetic_file, data_dir, split='train', transform=transform)
-    dataloader = DataLoader(dataset + synthetic_dataset, batch_size=8, shuffle=True, num_workers=4)
+    valid_dataset = MediQAQADataset(valid_file, data_dir, split='valid', transform=transform)
+    
+    train_dataloader = DataLoader(train_dataset + synthetic_dataset, batch_size=4, shuffle=True, num_workers=4)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=4, shuffle=False, num_workers=4)
     
     model = ClosedQAModel().cuda()
     processor = CLIPProcessor.from_pretrained('openai/clip-vit-base-patch16')
     
-    # Define separate criteria for different numbers of classes
     criteria = {
-        4: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID010, CQID012
-        8: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID011
-        7: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID015
-        10: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID020
-        3: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 1.0]).cuda()),  # CQID025, CQID035, CQID036
-        12: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda())  # CQID034
+        4: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 1.0]).cuda()),
+        8: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda()),
+        7: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda()),
+        10: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda()),
+        3: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 1.0]).cuda()),
+        12: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda())
     }
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
-    scheduler = CosineAnnealingLR(optimizer, T_max=20)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
     
-    for epoch in range(20):
+    best_valid_loss = float('inf')
+    patience_counter = 0
+    patience_limit = 5
+    
+    # Freeze vision model for first 5 epochs
+    for param in model.clip.vision_model.parameters():
+        param.requires_grad = False
+    
+    for epoch in range(30):
+        if epoch == 5:
+            for param in model.clip.vision_model.parameters():
+                param.requires_grad = True
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0.01)
+        
         model.train()
         total_loss = 0
-        for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}", leave=True, ncols=100):
+        for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1}", leave=True, ncols=100):
             images = batch['image'].cuda()
             queries = batch['query']
             closed_qa = batch['closed_qa']
@@ -265,10 +232,30 @@ def train_closed_qa():
             total_loss += loss.item()
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
         
-        scheduler.step()
-        print(f"Epoch {epoch+1}, Average Loss: {total_loss / len(dataloader):.4f}")
+        avg_loss = total_loss / len(train_dataloader)
+        print(f"Epoch {epoch+1}, Average Loss: {avg_loss:.4f}")
+        
+        # Evaluate on validation set
+        accuracies, f1_scores = evaluate(model, valid_dataloader, processor, criteria)
+        print(f"Validation Accuracies: {accuracies}")
+        print(f"Validation F1 Scores: {f1_scores}")
+        
+        valid_loss = sum(1 - acc for acc in accuracies.values()) / len(accuracies)
+        scheduler.step(valid_loss)
+        
+        # Early stopping
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), "/kaggle/working/closed_qa_clip_best.pth")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience_limit:
+                print("Early stopping triggered")
+                break
     
     torch.save(model.state_dict(), "/kaggle/working/closed_qa_clip.pth")
 
