@@ -194,7 +194,7 @@ def train_closed_qa():
     for param in model.clip.vision_model.parameters():
         param.requires_grad = False
     
-    for epoch in range(30):
+    for epoch in range(2):
         if epoch == 5:
             for param in model.clip.vision_model.parameters():
                 param.requires_grad = True
