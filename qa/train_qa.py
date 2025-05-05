@@ -8,11 +8,12 @@ import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
 import logging
-from torch.cuda.amp import autocast
+from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import accuracy_score, f1_score
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 class MediQAQADataset(Dataset):
@@ -39,10 +40,11 @@ class MediQAQADataset(Dataset):
             'CQID020-007', 'CQID020-008', 'CQID020-009', 'CQID025-001', 
             'CQID034-001', 'CQID035-001', 'CQID036-001'
         ]
+        # Load BERT models and tokenizers on CPU
         self.bert_models = {}
         self.bert_tokenizers = {}
         for qid in self.qids:
-            self.bert_models[qid] = DistilBertForSequenceClassification.from_pretrained(os.path.join(bert_model_dir, f"bert_{qid}")).cuda()
+            self.bert_models[qid] = DistilBertForSequenceClassification.from_pretrained(os.path.join(bert_model_dir, f"bert_{qid}"))
             self.bert_tokenizers[qid] = DistilBertTokenizer.from_pretrained(os.path.join(bert_model_dir, f"bert_{qid}"))
     
     def __len__(self):
@@ -85,7 +87,7 @@ class MediQAQADataset(Dataset):
             tokenizer = self.bert_tokenizers[qid]
             model.eval()
             with torch.no_grad():
-                inputs = tokenizer(query, return_tensors='pt', padding=True, truncation=True, max_length=128).to('cuda')
+                inputs = tokenizer(query, return_tensors='pt', padding=True, truncation=True, max_length=128)
                 outputs = model(**inputs)
                 closed_qa[qid] = torch.argmax(outputs.logits, dim=1).item()
         
@@ -166,29 +168,29 @@ def train_closed_qa():
     synthetic_dataset = MediQAQADataset(synthetic_file, data_dir, split='train', transform=transform)
     valid_dataset = MediQAQADataset(valid_file, data_dir, split='valid', transform=transform)
     
-    train_dataloader = DataLoader(train_dataset + synthetic_dataset, batch_size=4, shuffle=True, num_workers=4)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=4, shuffle=False, num_workers=4)
+    train_dataloader = DataLoader(train_dataset + synthetic_dataset, batch_size=2, shuffle=True, num_workers=0)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=2, shuffle=False, num_workers=0)
     
     model = ClosedQAModel().cuda()
     processor = CLIPProcessor.from_pretrained('openai/clip-vit-base-patch16')
     
     criteria = {
-        4: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 1.0]).cuda()),
-        8: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda()),
-        7: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda()),
-        10: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda()),
-        3: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 1.0]).cuda()),
-        12: nn.CrossEntropyLoss(weight=torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 1.0]).cuda())
+        4: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 1.0]).cuda()),
+        8: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda()),
+        7: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda()),
+        10: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda()),
+        3: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 1.0]).cuda()),
+        12: nn.CrossEntropyLoss(weight=torch.tensor([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.0]).cuda())
     }
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+    scaler = GradScaler()
     
     best_valid_loss = float('inf')
     patience_counter = 0
     patience_limit = 5
     
-    # Freeze vision model for first 5 epochs
     for param in model.clip.vision_model.parameters():
         param.requires_grad = False
     
@@ -231,14 +233,15 @@ def train_closed_qa():
             
             total_loss += loss.item()
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
         
         avg_loss = total_loss / len(train_dataloader)
         print(f"Epoch {epoch+1}, Average Loss: {avg_loss:.4f}")
         
-        # Evaluate on validation set
         accuracies, f1_scores = evaluate(model, valid_dataloader, processor, criteria)
         print(f"Validation Accuracies: {accuracies}")
         print(f"Validation F1 Scores: {f1_scores}")
@@ -246,7 +249,6 @@ def train_closed_qa():
         valid_loss = sum(1 - acc for acc in accuracies.values()) / len(accuracies)
         scheduler.step(valid_loss)
         
-        # Early stopping
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
             patience_counter = 0
