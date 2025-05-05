@@ -51,7 +51,7 @@ class MediQAQADataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        # Ground truth closed QA labels (use provided labels or improve regex/NLP-based labeling)
+        # Ground truth closed QA labels
         closed_qa = item.get('closed_qa', {})
         if not closed_qa:
             closed_qa = self.extract_closed_qa(item['query_content_en'].lower())
@@ -64,7 +64,6 @@ class MediQAQADataset(Dataset):
         }
     
     def extract_closed_qa(self, query_content):
-        # Improved label extraction (can be replaced with BERT-based NER or classification)
         closed_qa = {}
         
         # CQID010-001: How much of the body is affected
@@ -138,12 +137,12 @@ class MediQAQADataset(Dataset):
             2
         )
         
-        # CQID034-001: Lesion color
+        # CQID034-001: Lesion color (SỬA LỖI)
         colors = ['normal', 'pink', 'red', 'brown', 'blue', 'purple', 'black', 
                   'white', 'combination', 'hyperpigmentation', 'hypopigmentation']
         for i, color in enumerate(colors):
             if color in query_content:
-                closed_qa[qid] = i
+                closed_qa['CQID034-001'] = i
                 break
         else:
             closed_qa['CQID034-001'] = 11
@@ -170,7 +169,7 @@ class ClosedQAModel(nn.Module):
         'CQID011-004', 'CQID011-005', 'CQID011-006', 'CQID012-001', 
         'CQID012-002', 'CQID012-003', 'CQID012-004', 'CQID012-005', 
         'CQID012-006', 'CQID015-001', 'CQID020-001', 'CQID020-002', 
-        'CQID020-003', 'CQID020-004', 'CQID020-005', 'CQID020-006', 
+        'CQID020-003', 'CQ período-004', 'CQID020-005', 'CQID020-006', 
         'CQID020-007', 'CQID020-008', 'CQID020-009', 'CQID025-001', 
         'CQID034-001', 'CQID035-001', 'CQID036-001'
     ]):
