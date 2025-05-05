@@ -24,7 +24,7 @@ class MediQAQADataset(Dataset):
         with open(query_file, 'r') as f:
             self.data = json.load(f)
         
-        with open('closedquestions_definitions_imageclef2025.json', 'r') as f:
+        with open('/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json', 'r') as f:
             self.q_definitions = json.load(f)
         
         self.qids = [
