@@ -10,3 +10,5 @@ scikit-image
 scikit-learn
 tqdm
 matplotlib
+anthropic 
+open_clip_torch 
