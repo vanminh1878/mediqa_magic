@@ -64,7 +64,7 @@ def train_bert_model(qid, num_labels, train_file, valid_file, output_dir, epochs
         for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1} for {qid}"):
             input_ids = batch['input_ids'].cuda()
             attention_mask = batch['attention_mask'].cuda()
-            labels = torch.tensor([batch['labels'][qid]]).cuda()
+            labels = torch.tensor(batch['labels'][qid]).cuda()
             
             outputs = model(input_ids, attention_mask=attention_mask)
             loss = criterion(outputs.logits, labels.long())
@@ -83,7 +83,7 @@ def train_bert_model(qid, num_labels, train_file, valid_file, output_dir, epochs
             for batch in valid_dataloader:
                 input_ids = batch['input_ids'].cuda()
                 attention_mask = batch['attention_mask'].cuda()
-                labels = torch.tensor([batch['labels'][qid]]).cuda()
+                labels = torch.tensor(batch['labels'][qid]).cuda()
                 outputs = model(input_ids, attention_mask=attention_mask)
                 preds = torch.argmax(outputs.logits, dim=1).cpu().numpy()
                 all_preds.extend(preds)
