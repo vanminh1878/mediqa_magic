@@ -137,7 +137,7 @@ class MediQAQADataset(Dataset):
             2
         )
         
-        # CQID034-001: Lesion color (SỬA LỖI)
+        # CQID034-001: Lesion color
         colors = ['normal', 'pink', 'red', 'brown', 'blue', 'purple', 'black', 
                   'white', 'combination', 'hyperpigmentation', 'hypopigmentation']
         for i, color in enumerate(colors):
@@ -169,7 +169,7 @@ class ClosedQAModel(nn.Module):
         'CQID011-004', 'CQID011-005', 'CQID011-006', 'CQID012-001', 
         'CQID012-002', 'CQID012-003', 'CQID012-004', 'CQID012-005', 
         'CQID012-006', 'CQID015-001', 'CQID020-001', 'CQID020-002', 
-        'CQID020-003', 'CQ período-004', 'CQID020-005', 'CQID020-006', 
+        'CQID020-003', 'CQID020-004', 'CQID020-005', 'CQID020-006', 
         'CQID020-007', 'CQID020-008', 'CQID020-009', 'CQID025-001', 
         'CQID034-001', 'CQID035-001', 'CQID036-001'
     ]):
@@ -217,7 +217,16 @@ def train_closed_qa():
     model = ClosedQAModel().cuda()
     processor = CLIPProcessor.from_pretrained('openai/clip-vit-base-patch16')
     
-    criterion = nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 1.0]).cuda())  # Weight non-"Not mentioned" classes higher
+    # Define separate criteria for different numbers of classes
+    criteria = {
+        4: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID010, CQID012
+        8: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID011
+        7: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID015
+        10: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda()),  # CQID020
+        3: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 1.0]).cuda()),  # CQID025, CQID035, CQID036
+        12: nn.CrossEntropyLoss(weight=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]).cuda())  # CQID034
+    }
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
     scheduler = CosineAnnealingLR(optimizer, T_max=20)
     
@@ -239,6 +248,18 @@ def train_closed_qa():
                 for qid in model.qids:
                     if qid in closed_qa and closed_qa[qid] is not None:
                         labels = torch.tensor([closed_qa[qid][i] for i in range(len(closed_qa[qid]))]).cuda()
+                        num_classes = (
+                            4 if qid.startswith('CQID010') else
+                            8 if qid.startswith('CQID011') else
+                            4 if qid.startswith('CQID012') else
+                            7 if qid == 'CQID015-001' else
+                            10 if qid.startswith('CQID020') else
+                            3 if qid == 'CQID025-001' else
+                            12 if qid == 'CQID034-001' else
+                            3 if qid == 'CQID035-001' else
+                            3
+                        )
+                        criterion = criteria[num_classes]
                         loss += criterion(outputs[qid], labels.long())
             
             total_loss += loss.item()
