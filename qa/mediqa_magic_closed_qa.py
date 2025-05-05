@@ -47,10 +47,12 @@ def embed_text(texts, batch_size=32):
 # Hàm nhúng hình ảnh bằng CLIP
 def embed_images(image_paths):
     images = []
+    valid_paths = []
     for path in image_paths:
         try:
             img = Image.open(path).convert("RGB")
             images.append(preprocess(img))
+            valid_paths.append(path)
         except Exception as e:
             print(f"Error loading image {path}: {e}")
             continue
@@ -59,12 +61,12 @@ def embed_images(image_paths):
     images = torch.stack(images).to(DEVICE)
     with torch.no_grad():
         image_embeds = clip_model.encode_image(images)
-    return image_embeds.cpu().numpy()
+    return image_embeds.cpu().numpy(), valid_paths
 
 # Hàm trả lời câu hỏi đóng bằng CLIP
 def answer_with_clip(image_paths, question, options):
     try:
-        image_embeds = embed_images(image_paths)
+        image_embeds, valid_paths = embed_images(image_paths)
         option_embeds = embed_text(options)
         
         # Chuẩn hóa embedding
@@ -74,10 +76,10 @@ def answer_with_clip(image_paths, question, options):
         
         # Chọn tùy chọn có độ tương đồng cao nhất
         best_option_idx = np.argmax(similarities.mean(axis=0))
-        return options[best_option_idx], best_option_idx
+        return options[best_option_idx], int(best_option_idx)  # Chuyển numpy.int64 thành int
     except Exception as e:
         print(f"CLIP error for question {question}: {e}")
-        return options[-1], len(options) - 1  # Trả về "Not mentioned" nếu lỗi
+        return options[-1], int(len(options) - 1)  # Chuyển numpy.int64 thành int
 
 # Hàm xử lý một tập dữ liệu
 def process_dataset(data_file, output_filename):
@@ -121,6 +123,7 @@ def process_dataset(data_file, output_filename):
         print(f"Results saved to {output_path}")
     except Exception as e:
         print(f"Error saving results to {output_path}: {e}")
+        raise
 
 # Hàm chính
 def main():
