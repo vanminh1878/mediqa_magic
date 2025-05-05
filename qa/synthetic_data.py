@@ -2,7 +2,7 @@ import json
 import os
 import random
 
-def generate_synthetic_data(output_file, num_samples=2000, image_dir='/kaggle/input/mediqa-data/mediqa-data/images/'):
+def generate_synthetic_data(output_file, num_samples=2500, image_dir='/kaggle/input/mediqa-data/mediqa-data/images/'):
     diseases = ['folliculitis', 'pompholyx', 'psoriasis', 'vitiligo', 'syphilitic rash', 'eczema', 'acne', 'melanoma', 'urticaria', 'parapsoriasis']
     locations = ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm']
     time_units = ['hour', 'day', 'week', 'month', 'year']
@@ -55,7 +55,7 @@ def generate_synthetic_data(output_file, num_samples=2000, image_dir='/kaggle/in
             'CQID012-003': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(random.choice(sizes)) if random.random() > 0.2 else 3,
             'CQID012-004': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(random.choice(sizes)) if random.random() > 0.3 else 3,
             'CQID012-005': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(random.choice(sizes)) if random.random() > 0.4 else 3,
-            'CQID012-006': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(random.choice(sizes)) if random.random() > 0.5 else 3,
+            'CQID012-006': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(random.choice(sizes)) if random.random() > 0.2 else 3,
             'CQID015-001': ['within hours', 'within days', 'within weeks', 'within months', 'over a year', 'multiple years', 'Not mentioned'].index(
                 {'hour': 'within hours', 'day': 'within days', 'week': 'within weeks', 'month': 'within months', 'year': 'multiple years'}[time_unit]
             ),

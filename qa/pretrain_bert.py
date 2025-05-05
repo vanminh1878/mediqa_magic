@@ -5,46 +5,19 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 from tqdm import tqdm
 import os
-from sklearn.metrics import accuracy_score
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=7.0, gamma=2, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-    
-    def forward(self, inputs, targets):
-        ce_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
-        pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        return focal_loss
 
 class BERTQADataset(Dataset):
-    def __init__(self, json_file, qids, split='train'):
-        self.split = split
+    def __init__(self, json_file, qids):
         with open(json_file, 'r') as f:
             self.data = json.load(f)
         self.qids = qids
         self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-        
-        # Filter samples with valid labels for the given qid
-        self.valid_data = [
-            item for item in self.data
-            if 'closed_qa' in item and qids[0] in item['closed_qa']
-        ]
-        if len(self.valid_data) < len(self.data):
-            print(f"Warning: {len(self.data) - len(self.valid_data)}/{len(self.data)} samples in {json_file} lack {qids[0]} label")
     
     def __len__(self):
-        return len(self.valid_data)
+        return len(self.data)
     
     def __getitem__(self, idx):
-        item = self.valid_data[idx]
+        item = self.data[idx]
         query = f"{item['query_title_en']} {item['query_content_en']}"[:512]
         labels = {qid: item['closed_qa'][qid] for qid in self.qids if qid in item.get('closed_qa', {})}
         inputs = self.tokenizer(query, return_tensors='pt', padding='max_length', truncation=True, max_length=128)
@@ -54,68 +27,37 @@ class BERTQADataset(Dataset):
             'labels': labels
         }
 
-def train_bert_model(qid, num_labels, train_file, valid_file, output_dir, epochs=15):
+def train_bert_model(qid, num_labels, train_file, output_dir, epochs=15):
     os.makedirs(output_dir, exist_ok=True)
-    train_dataset = BERTQADataset(train_file, [qid], split='train')
-    valid_dataset = BERTQADataset(valid_file, [qid], split='valid')
-    train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=16, shuffle=False)
+    dataset = BERTQADataset(train_file, [qid])
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
     
     model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=num_labels).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
-    criterion = FocalLoss(alpha=7.0, gamma=2)
     
-    best_valid_acc = 0
     for epoch in range(epochs):
         model.train()
         total_loss = 0
-        for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1} for {qid}"):
+        for batch in tqdm(dataloader, desc=f"Epoch {epoch+1} for {qid}"):
             input_ids = batch['input_ids'].cuda()
             attention_mask = batch['attention_mask'].cuda()
-            labels = torch.tensor(batch['labels'][qid]).cuda()
+            labels = torch.tensor([batch['labels'][qid][i] for i in range(len(batch['labels'][qid]))]).cuda()
             
-            outputs = model(input_ids, attention_mask=attention_mask)
-            loss = criterion(outputs.logits, labels.long())
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
             total_loss += loss.item()
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         
-        print(f"Epoch {epoch+1} for {qid}, Average Loss: {total_loss / len(train_dataloader):.4f}")
-        
-        model.eval()
-        all_preds = []
-        all_labels = []
-        with torch.no_grad():
-            for batch in tqdm(valid_dataloader, desc=f"Validating {qid}"):
-                input_ids = batch['input_ids'].cuda()
-                attention_mask = batch['attention_mask'].cuda()
-                if qid in batch['labels']:
-                    labels = torch.tensor(batch['labels'][qid]).cuda()
-                    outputs = model(input_ids, attention_mask=attention_mask)
-                    preds = torch.argmax(outputs.logits, dim=1).cpu().numpy()
-                    all_preds.extend(preds)
-                    all_labels.extend(labels.cpu().numpy())
-                else:
-                    print(f"Warning: Skipping batch in validation for {qid} due to missing labels")
-        
-        if all_labels:  # Only compute accuracy if there are valid labels
-            valid_acc = accuracy_score(all_labels, all_preds)
-            print(f"Validation Accuracy for {qid}: {valid_acc:.4f}")
-            
-            if valid_acc > best_valid_acc:
-                best_valid_acc = valid_acc
-                model.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
-                train_dataset.tokenizer.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
-        else:
-            print(f"No valid labels for {qid} in validation set, skipping accuracy calculation")
+        print(f"Epoch {epoch+1} for {qid}, Average Loss: {total_loss / len(dataloader):.4f}")
     
-    print(f"Best model for {qid} saved with validation accuracy: {best_valid_acc:.4f}")
+    model.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
+    dataset.tokenizer.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
 
 if __name__ == "__main__":
     synthetic_file = "/kaggle/working/synthetic_train.json"
-    valid_file = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
     output_dir = "/kaggle/working/bert_models"
     
     qid_configs = {
@@ -149,4 +91,4 @@ if __name__ == "__main__":
     }
     
     for qid, num_labels in qid_configs.items():
-        train_bert_model(qid, num_labels, synthetic_file, valid_file, output_dir)
+        train_bert_model(qid, num_labels, synthetic_file, output_dir)
