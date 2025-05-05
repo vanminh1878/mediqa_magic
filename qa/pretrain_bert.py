@@ -31,12 +31,20 @@ class BERTQADataset(Dataset):
             self.data = json.load(f)
         self.qids = qids
         self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+        
+        # Filter samples with valid labels for the given qid
+        self.valid_data = [
+            item for item in self.data
+            if 'closed_qa' in item and qids[0] in item['closed_qa']
+        ]
+        if len(self.valid_data) < len(self.data):
+            print(f"Warning: {len(self.data) - len(self.valid_data)}/{len(self.data)} samples in {json_file} lack {qids[0]} label")
     
     def __len__(self):
-        return len(self.data)
+        return len(self.valid_data)
     
     def __getitem__(self, idx):
-        item = self.data[idx]
+        item = self.valid_data[idx]
         query = f"{item['query_title_en']} {item['query_content_en']}"[:512]
         labels = {qid: item['closed_qa'][qid] for qid in self.qids if qid in item.get('closed_qa', {})}
         inputs = self.tokenizer(query, return_tensors='pt', padding='max_length', truncation=True, max_length=128)
@@ -80,22 +88,28 @@ def train_bert_model(qid, num_labels, train_file, valid_file, output_dir, epochs
         all_preds = []
         all_labels = []
         with torch.no_grad():
-            for batch in valid_dataloader:
+            for batch in tqdm(valid_dataloader, desc=f"Validating {qid}"):
                 input_ids = batch['input_ids'].cuda()
                 attention_mask = batch['attention_mask'].cuda()
-                labels = torch.tensor(batch['labels'][qid]).cuda()
-                outputs = model(input_ids, attention_mask=attention_mask)
-                preds = torch.argmax(outputs.logits, dim=1).cpu().numpy()
-                all_preds.extend(preds)
-                all_labels.extend(labels.cpu().numpy())
+                if qid in batch['labels']:
+                    labels = torch.tensor(batch['labels'][qid]).cuda()
+                    outputs = model(input_ids, attention_mask=attention_mask)
+                    preds = torch.argmax(outputs.logits, dim=1).cpu().numpy()
+                    all_preds.extend(preds)
+                    all_labels.extend(labels.cpu().numpy())
+                else:
+                    print(f"Warning: Skipping batch in validation for {qid} due to missing labels")
         
-        valid_acc = accuracy_score(all_labels, all_preds)
-        print(f"Validation Accuracy for {qid}: {valid_acc:.4f}")
-        
-        if valid_acc > best_valid_acc:
-            best_valid_acc = valid_acc
-            model.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
-            train_dataset.tokenizer.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
+        if all_labels:  # Only compute accuracy if there are valid labels
+            valid_acc = accuracy_score(all_labels, all_preds)
+            print(f"Validation Accuracy for {qid}: {valid_acc:.4f}")
+            
+            if valid_acc > best_valid_acc:
+                best_valid_acc = valid_acc
+                model.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
+                train_dataset.tokenizer.save_pretrained(os.path.join(output_dir, f"bert_{qid}"))
+        else:
+            print(f"No valid labels for {qid} in validation set, skipping accuracy calculation")
     
     print(f"Best model for {qid} saved with validation accuracy: {best_valid_acc:.4f}")
 
