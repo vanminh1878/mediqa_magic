@@ -1,15 +1,14 @@
 import json
 import os
 import random
-import re
 
-def generate_synthetic_data(output_file, num_samples=200, image_dir='/kaggle/input/mediqa-data/mediqa-data/images/'):
-    diseases = ['folliculitis', 'pompholyx', 'psoriasis', 'vitiligo', 'syphilitic rash']
-    locations = ['head', 'neck', 'arm', 'thigh', 'chest', 'back', 'palm']
+def generate_synthetic_data(output_file, num_samples=500, image_dir='/kaggle/input/mediqa-data/mediqa-data/images/'):
+    diseases = ['folliculitis', 'pompholyx', 'psoriasis', 'vitiligo', 'syphilitic rash', 'eczema', 'acne', 'melanoma']
+    locations = ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm']
     time_units = ['hour', 'day', 'week', 'month', 'year']
     sizes = ['thumb nail', 'palm', 'large area']
-    descriptions = ['raised', 'flat', 'sunken', 'thick', 'thin', 'warty', 'crust', 'scab', 'weeping', 'blister']
-    colors = ['pink', 'red', 'brown', 'blue', 'purple', 'black', 'white']
+    descriptions = ['raised', 'flat', 'sunken', 'thick', 'thin', 'warty', 'crust', 'scab', 'weeping', 'bumpy']
+    colors = ['normal', 'pink', 'red', 'brown', 'blue', 'purple', 'black', 'white', 'combination', 'hyperpigmentation', 'hypopigmentation']
     textures = ['smooth', 'rough']
     extents = ['single spot', 'limited area', 'widespread']
     
@@ -20,7 +19,8 @@ def generate_synthetic_data(output_file, num_samples=200, image_dir='/kaggle/inp
     synthetic_data = []
     for i in range(num_samples):
         disease = random.choice(diseases)
-        location = random.choice(locations)
+        num_locations = random.randint(1, 3)  # Multiple locations for diversity
+        selected_locations = random.sample(locations, num_locations)
         time_unit = random.choice(time_units)
         size = random.choice(sizes)
         description = random.choice(descriptions)
@@ -34,25 +34,27 @@ def generate_synthetic_data(output_file, num_samples=200, image_dir='/kaggle/inp
         query_title = f"Is this {disease}?"
         duration = random.randint(1, 12) if time_unit != 'year' else random.randint(1, 5)
         query_content = (
-            f"I have {extent} {description} {color} lesions on my {location}, "
+            f"I have {extent} {description} {color} lesions on my {', '.join(selected_locations)}, "
             f"about {size}, for {duration} {time_unit}{'s' if duration > 1 else ''}. "
             f"It is {texture} and {is_itchy}. "
             f"There {'is' if lesion_count == 'single' else 'are'} {lesion_count} lesion{'s' if lesion_count == 'multiple' else ''}."
         )
-        response = f"Based on the description, it could be {disease}. Consult a dermatologist for {random.choice(['topical treatment', 'biopsy', 'medication'])}."
+        response = f"Based on the description, it could be {disease}. Consult a dermatologist for diagnosis."
         
         closed_qa = {
             'CQID010-001': ['single spot', 'limited area', 'widespread', 'Not mentioned'].index(extent),
-            'CQID011-001': ['head', 'neck', 'arm', 'thigh', 'chest', 'back', 'palm', 'Not mentioned'].index(location),
-            'CQID011-002': 7, 'CQID011-003': 7, 'CQID011-004': 7, 'CQID011-005': 7, 'CQID011-006': 7,
+            'CQID011-001': ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm', 'Not mentioned'].index(selected_locations[0]),
+            'CQID011-002': ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm', 'Not mentioned'].index(selected_locations[1]) if len(selected_locations) > 1 else 7,
+            'CQID011-003': ['head', 'neck', 'upper extremities', 'lower extremities', 'chest', 'abdomen', 'back', 'palm', 'Not mentioned'].index(selected_locations[2]) if len(selected_locations) > 2 else 7,
+            'CQID011-004': 7, 'CQID011-005': 7, 'CQID011-006': 7,
             'CQID012-001': ['thumb nail', 'palm', 'large area', 'Not mentioned'].index(size),
             'CQID012-002': 3, 'CQID012-003': 3, 'CQID012-004': 3, 'CQID012-005': 3, 'CQID012-006': 3,
             'CQID015-001': ['hour', 'day', 'week', 'month', 'year', 'years', 'Not mentioned'].index(time_unit if time_unit != 'year' else 'years'),
-            'CQID020-001': ['raised', 'flat', 'sunken', 'thick', 'thin', 'warty', 'crust', 'scab', 'weeping', 'blister', 'Not mentioned'].index(description),
+            'CQID020-001': ['raised', 'flat', 'sunken', 'thick', 'thin', 'warty', 'crust', 'scab', 'weeping', 'bumpy', 'Not mentioned'].index(description),
             'CQID020-002': 9, 'CQID020-003': 9, 'CQID020-004': 9, 'CQID020-005': 9, 'CQID020-006': 9,
             'CQID020-007': 9, 'CQID020-008': 9, 'CQID020-009': 9,
             'CQID025-001': 0 if is_itchy == 'itchy' else 1,
-            'CQID034-001': ['normal', 'pink', 'red', 'brown', 'blue', 'purple', 'black', 'white', 'combination', 'hyperpigmentation', 'hypopigmentation', 'Not mentioned'].index(color) + 1,
+            'CQID034-001': ['normal', 'pink', 'red', 'brown', 'blue', 'purple', 'black', 'white', 'combination', 'hyperpigmentation', 'hypopigmentation', 'Not mentioned'].index(color),
             'CQID035-001': ['single', 'multiple', 'Not mentioned'].index(lesion_count),
             'CQID036-001': ['smooth', 'rough', 'Not mentioned'].index(texture)
         }
