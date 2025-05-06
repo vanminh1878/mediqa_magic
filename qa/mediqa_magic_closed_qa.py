@@ -10,6 +10,10 @@ from tqdm import tqdm
 import numpy as np
 from torch.amp import autocast, GradScaler
 from torch.utils.data import Dataset, DataLoader
+import torch.multiprocessing as mp
+
+# Đặt phương thức khởi tạo tiến trình
+mp.set_start_method('spawn', force=True)
 
 # Cấu hình
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -708,6 +712,8 @@ def validate_output(output_file, question_file):
 # Hàm chính
 def main():
     try:
+        # Đặt phương thức spawn cho multiprocessing
+        mp.set_start_method('spawn', force=True)
         print(f"PyTorch version: {torch.__version__}")
         
         print("Fine-tuning CLIP + DistilBERT...")
