@@ -98,8 +98,29 @@ def extract_labels(query_content, responses, question_dict):
                 label = 8
             elif "psoriasis" in response_text:
                 label = 2
+            elif any(k in query_lower for k in ["red", "pink"]):
+                label = 0
+            elif any(k in query_lower for k in ["brown"]):
+                label = 4
         elif question_type == "Lesion Count":
             if any(k in query_lower for k in ["rash", "lesions"]):
+                label = 1
+            elif any(k in query_lower for k in ["single"]):
+                label = 0
+        elif question_type == "Size":
+            if any(k in query_lower for k in ["large"]):
+                label = 0
+            elif any(k in query_lower for k in ["small"]):
+                label = 1
+        elif question_type == "Skin Description":
+            if any(k in query_lower for k in ["bump"]):
+                label = 0
+            elif any(k in query_lower for k in ["flat"]):
+                label = 1
+        elif question_type == "Texture":
+            if any(k in query_lower for k in ["smooth"]):
+                label = 0
+            elif any(k in query_lower for k in ["rough"]):
                 label = 1
         
         labels[qid] = label
@@ -131,14 +152,14 @@ def check_not_mentioned(query_content, question_type):
 
 # Mô hình kết hợp CLIP và DistilBERT
 class ClipBertModel(nn.Module):
-    def __init__(self, clip_model, bert_model, num_options):
+    def __init__(self, clip_model, bert_model, max_options=12):
         super().__init__()
         self.clip_model = clip_model
         self.bert_model = bert_model
         self.image_projection = nn.Linear(512, 768)
-        self.fc = nn.Linear(768 + 768, num_options)
+        self.fc = nn.Linear(768 + 768, max_options)
 
-    def forward(self, image_embeds, query_tokens, option_tokens):
+    def forward(self, image_embeds, query_tokens, option_tokens, num_options):
         with autocast(device_type=DEVICE_TYPE):
             # Nhúng query
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
@@ -146,21 +167,22 @@ class ClipBertModel(nn.Module):
             # Biến đổi image_embeds
             image_embeds = self.image_projection(image_embeds).float()
             
-            # Nhúng option_tokens một lần
+            # Nhúng option_tokens
+            batch_size = image_embeds.size(0)
+            option_input_ids = option_tokens["input_ids"].reshape(batch_size * num_options, -1)
+            option_attention_mask = option_tokens["attention_mask"].reshape(batch_size * num_options, -1)
             option_embeds = self.bert_model(
-                input_ids=option_tokens["input_ids"].view(-1, option_tokens["input_ids"].size(-1)),
-                attention_mask=option_tokens["attention_mask"].view(-1, option_tokens["attention_mask"].size(-1))
+                input_ids=option_input_ids,
+                attention_mask=option_attention_mask
             ).last_hidden_state[:, 0, :].float()
             
-            # Reshape để khớp batch_size
-            batch_size = image_embeds.size(0)
-            num_options = option_tokens["input_ids"].size(1)
-            option_embeds = option_embeds.view(batch_size, num_options, -1).mean(dim=1)
+            # Reshape option_embeds
+            option_embeds = option_embeds.reshape(batch_size, num_options, -1).mean(dim=1)
         
         # Kết hợp embedding
         combined_embed = image_embeds + query_embeds
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
-        return logits
+        return logits[:, :num_options]  # Cắt logits theo num_options thực tế
 
 # Dataset cho tinh chỉnh
 class MediqaDataset(Dataset):
@@ -270,7 +292,7 @@ def collate_fn(batch):
 def fine_tune_model():
     dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR, clip_model)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
-    model = ClipBertModel(clip_model, bert_model, num_options=12).to(DEVICE)
+    model = ClipBertModel(clip_model, bert_model, max_options=12).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scaler = torch.amp.GradScaler('cuda')
     
@@ -287,7 +309,8 @@ def fine_tune_model():
             with autocast(device_type=DEVICE_TYPE):
                 loss = 0
                 for qid in option_texts:
-                    logits = model(image_embeds, query_tokens, option_texts[qid])
+                    num_options = option_texts[qid]["input_ids"].size(1)
+                    logits = model(image_embeds, query_tokens, option_texts[qid], num_options)
                     loss += nn.CrossEntropyLoss()(logits, labels[qid])
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -338,8 +361,10 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         )
         option_tokens = {k: v.to(DEVICE) for k, v in option_tokens.items()}
         
-        weight_image = 0.4  # Tăng trọng số hình ảnh
-        weight_text = 0.6   # Giảm trọng số văn bản
+        num_options = len(options)
+        
+        weight_image = 0.4
+        weight_text = 0.6
         if question_type in ["Onset", "Itch", "Lesion Count"]:
             weight_image, weight_text = 0.1, 0.9
         elif question_type in ["Site Location", "Lesion Color"]:
@@ -347,7 +372,7 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         
         model.eval()
         with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
-            logits = model(image_embed, query_tokens, option_tokens)
+            logits = model(image_embed, query_tokens, option_tokens, num_options)
             logits = weight_image * logits + weight_text * logits
             best_option_idx = torch.argmax(logits, dim=1).item()
         
@@ -501,6 +526,12 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 elif "psoriasis" in response_lower and idx == 2:
                     is_correct = "Likely Correct"
                     correct_count += 1
+                elif any(k in query_lower for k in ["red", "pink"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in query_lower for k in ["brown"]) and idx == 4:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
                 elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
@@ -510,13 +541,46 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 if any(k in query_lower for k in ["rash", "lesions"]) and idx == 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
+                elif any(k in query_lower for k in ["single"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
                 elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            else:
-                if check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+            elif q_data["question_type_en"] == "Size":
+                if any(k in query_lower for k in ["large"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in query_lower for k in ["small"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif q_data["question_type_en"] == "Skin Description":
+                if any(k in query_lower for k in ["bump"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in query_lower for k in ["flat"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif q_data["question_type_en"] == "Texture":
+                if any(k in query_lower for k in ["smooth"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in query_lower for k in ["rough"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
