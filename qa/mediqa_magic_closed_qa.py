@@ -20,12 +20,13 @@ VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
 TEST_FILE = "/kaggle/input/mediqa-data/mediqa-data/test.json"
 QUESTION_FILE = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
 OUTPUT_DIR = "/kaggle/working"
-BATCH_SIZE = 8
+BATCH_SIZE = 16  # Tăng để huấn luyện nhanh hơn
 LEARNING_RATE = 1e-5
-EPOCHS = 3
+EPOCHS = 5  # Tăng để học tốt hơn
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
 MAX_IMAGES = 5
 MAX_LENGTH = 128
+PATIENCE = 2  # Early stopping
 
 # Xóa cache CUDA và bật expandable_segments
 torch.cuda.empty_cache()
@@ -50,77 +51,106 @@ except Exception as e:
 def extract_labels(query_content, responses, question_dict):
     query_lower = query_content.lower()
     response_text = " ".join([r["content_en"].lower() for r in responses]).lower()
+    text = query_lower + " " + response_text
     labels = {}
     
     for qid, q_data in question_dict.items():
         question_type = q_data["question_type_en"]
         options = q_data["options_en"]
-        label = len(options) - 1
+        label = len(options) - 1  # Mặc định là Not mentioned
         
         if question_type == "Onset":
-            if any(k in query_lower for k in ["hour"]):
+            if any(k in text for k in ["hour"]):
                 label = 0
-            elif any(k in query_lower for k in ["day"]):
+            elif any(k in text for k in ["day"]):
                 label = 1
-            elif any(k in query_lower for k in ["week"]):
+            elif any(k in text for k in ["week"]):
                 label = 2
-            elif any(k in query_lower for k in ["month", "six months"]):
+            elif any(k in text for k in ["month", "six months"]):
                 label = 3
-            elif any(k in query_lower for k in ["year"]):
+            elif any(k in text for k in ["year"]):
                 label = 4
-            elif any(k in query_lower for k in ["ten years", "multiple years"]):
+            elif any(k in text for k in ["ten years", "multiple years"]):
                 label = 5
         elif question_type == "Itch":
-            if any(k in query_lower for k in ["itch", "intense itching"]):
+            if any(k in text for k in ["itch", "pruritus", "scratch", "irritat"]):
                 label = 0
-            elif any(k in query_lower for k in ["not itch"]):
+            elif any(k in text for k in ["not itch", "no itch"]):
                 label = 1
         elif question_type == "Site":
-            if any(k in query_lower for k in ["systemic", "widespread"]):
+            if any(k in text for k in ["systemic", "widespread", "whole body"]):
                 label = 2
-            elif any(k in query_lower for k in ["area", "spot"]):
+            elif any(k in text for k in ["area", "spot", "region"]):
                 label = 1
+            elif any(k in text for k in ["single"]):
+                label = 0
         elif question_type == "Site Location":
             locations = []
             location_map = {
-                "head": 0, "neck": 1, "arm": 2, "leg": 3, "chest": 4, "abdomen": 4, "back": 5,
-                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "thumb": 2
+                "head": 0, "neck": 1, "upper extremities": 2, "lower extremities": 3, "chest/abdomen": 4, "back": 5,
+                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "thumb": 2, "arm": 2, "leg": 3,
+                "chest": 4, "abdomen": 4, "eyebrow": 0, "sole": 3
             }
             for loc, idx in location_map.items():
-                if loc in query_lower or loc in response_text:
-                    if idx not in locations:
-                        locations.append(idx)
+                if loc in text and idx not in locations:
+                    locations.append(idx)
             if qid.startswith("CQID011-"):
                 q_num = int(qid.split("-")[1])
                 label = locations[q_num - 1] if q_num <= len(locations) else len(options) - 1
         elif question_type == "Lesion Color":
-            if any(k in query_lower for k in ["pale"]):
-                label = 8
-            elif "psoriasis" in response_text:
+            if any(k in text for k in ["red", "pink", "erythema"]):
                 label = 2
-            elif any(k in query_lower for k in ["red", "pink"]):
-                label = 0
-            elif any(k in query_lower for k in ["brown"]):
+            elif any(k in text for k in ["brown"]):
+                label = 3
+            elif any(k in text for k in ["blue"]):
                 label = 4
+            elif any(k in text for k in ["purple", "purplish"]):
+                label = 5
+            elif any(k in text for k in ["black"]):
+                label = 6
+            elif any(k in text for k in ["white", "pale", "leukoplakia"]):
+                label = 7
+            elif any(k in text for k in ["combination"]):
+                label = 8
+            elif any(k in text for k in ["hyperpigmentation"]):
+                label = 9
+            elif any(k in text for k in ["hypopigmentation"]):
+                label = 10
         elif question_type == "Lesion Count":
-            if any(k in query_lower for k in ["rash", "lesions"]):
+            if any(k in text for k in ["rash", "rashes", "lesions", "spots", "multiple"]):
                 label = 1
-            elif any(k in query_lower for k in ["single"]):
+            elif any(k in text for k in ["single", "one"]):
                 label = 0
         elif question_type == "Size":
-            if any(k in query_lower for k in ["large"]):
+            if any(k in text for k in ["large", "bigger"]):
+                label = 2
+            elif any(k in text for k in ["small", "nail"]):
                 label = 0
-            elif any(k in query_lower for k in ["small"]):
+            elif any(k in text for k in ["palm"]):
                 label = 1
         elif question_type == "Skin Description":
-            if any(k in query_lower for k in ["bump"]):
+            if any(k in text for k in ["bump", "raised", "swollen"]):
                 label = 0
-            elif any(k in query_lower for k in ["flat"]):
+            elif any(k in text for k in ["flat", "macula"]):
                 label = 1
+            elif any(k in text for k in ["sunken", "atrophy", "loss"]):
+                label = 2
+            elif any(k in text for k in ["thick", "keratosis"]):
+                label = 3
+            elif any(k in text for k in ["thin"]):
+                label = 4
+            elif any(k in text for k in ["wart"]):
+                label = 5
+            elif any(k in text for k in ["crust", "peeling"]):
+                label = 6
+            elif any(k in text for k in ["scab"]):
+                label = 7
+            elif any(k in text for k in ["weeping", "exudation"]):
+                label = 8
         elif question_type == "Texture":
-            if any(k in query_lower for k in ["smooth"]):
+            if any(k in text for k in ["smooth", "no scales"]):
                 label = 0
-            elif any(k in query_lower for k in ["rough"]):
+            elif any(k in text for k in ["rough", "scaly", "scales", "peeling"]):
                 label = 1
         
         labels[qid] = label
@@ -129,25 +159,25 @@ def extract_labels(query_content, responses, question_dict):
 
 # Hàm kiểm tra "Not mentioned"
 def check_not_mentioned(query_content, question_type):
-    query_content = query_content.lower()
+    query_lower = query_content.lower()
     if question_type == "Onset":
-        return not any(keyword in query_content for keyword in ["hour", "day", "week", "month", "year", "since", "ago", "ten years"])
+        return not any(k in query_lower for k in ["hour", "day", "week", "month", "year", "since", "ago", "ten years"])
     if question_type == "Itch":
-        return not any(keyword in query_content for keyword in ["itch", "scratch", "irritat", "not itch", "intense"])
+        return not any(k in query_lower for k in ["itch", "scratch", "irritat", "pruritus", "not itch", "no itch"])
     if question_type == "Site":
-        return not any(keyword in query_content for keyword in ["area", "spot", "region", "widespread", "systemic"])
+        return not any(k in query_lower for k in ["area", "spot", "region", "widespread", "systemic", "single"])
     if question_type == "Site Location":
-        return not any(keyword in query_content for keyword in ["head", "neck", "arm", "leg", "chest", "abdomen", "back", "hand", "foot", "thigh", "palm", "lip", "finger"])
+        return not any(k in query_lower for k in ["head", "neck", "arm", "leg", "chest", "abdomen", "back", "hand", "foot", "thigh", "palm", "lip", "finger", "eyebrow", "sole"])
     if question_type == "Size":
-        return not any(keyword in query_content for keyword in ["size", "large", "small", "thumb", "palm"])
+        return not any(k in query_lower for k in ["size", "large", "small", "thumb", "palm", "bigger", "nail"])
     if question_type == "Skin Description":
-        return not any(keyword in query_content for keyword in ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weep", "lesion"])
+        return not any(k in query_lower for k in ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weep", "lesion", "raised", "swollen", "atrophy", "keratosis", "peeling", "exudation"])
     if question_type == "Lesion Color":
-        return not any(keyword in query_content for keyword in ["color", "red", "pink", "brown", "blue", "purple", "black", "white", "pigment", "pale"])
+        return not any(k in query_lower for k in ["color", "red", "pink", "brown", "blue", "purple", "black", "white", "pigment", "pale", "erythema", "purplish", "leukoplakia"])
     if question_type == "Lesion Count":
-        return not any(keyword in query_content for keyword in ["single", "multiple", "many", "few", "rash", "lesions"])
+        return not any(k in query_lower for k in ["single", "multiple", "many", "few", "rash", "rashes", "lesions", "spots"])
     if question_type == "Texture":
-        return not any(keyword in query_content for keyword in ["smooth", "rough", "texture"])
+        return not any(k in query_lower for k in ["smooth", "rough", "texture", "scales", "scaly", "peeling"])
     return True
 
 # Mô hình kết hợp CLIP và DistilBERT
@@ -157,6 +187,7 @@ class ClipBertModel(nn.Module):
         self.clip_model = clip_model
         self.bert_model = bert_model
         self.image_projection = nn.Linear(512, 768)
+        self.dropout = nn.Dropout(0.3)  # Thêm dropout
         self.fc = nn.Linear(768 + 768, max_options)
 
     def forward(self, image_embeds, query_tokens, option_tokens, num_options):
@@ -181,6 +212,7 @@ class ClipBertModel(nn.Module):
         
         # Kết hợp embedding
         combined_embed = image_embeds + query_embeds
+        combined_embed = self.dropout(combined_embed)
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
         return logits[:, :num_options]  # Cắt logits theo num_options thực tế
 
@@ -215,7 +247,8 @@ class MediqaDataset(Dataset):
                 with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
                     embed = self.clip_model.encode_image(img_tensor).float()
                 image_embeds.append(embed)
-            except:
+            except Exception as e:
+                print(f"Error loading image {path}: {e}")
                 continue
         if not image_embeds:
             image_embeds = [torch.zeros(1, 512).to(DEVICE)]
@@ -291,10 +324,13 @@ def collate_fn(batch):
 # Tinh chỉnh mô hình
 def fine_tune_model():
     dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR, clip_model)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=4)
     model = ClipBertModel(clip_model, bert_model, max_options=12).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scaler = torch.amp.GradScaler('cuda')
+    
+    best_loss = float('inf')
+    patience_counter = 0
     
     for epoch in range(EPOCHS):
         model.train()
@@ -317,10 +353,22 @@ def fine_tune_model():
             scaler.update()
             total_loss += loss.item()
         
-        print(f"Epoch {epoch + 1}, Loss: {total_loss / len(dataloader):.4f}")
+        avg_loss = total_loss / len(dataloader)
+        print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}")
         
-        torch.save(model.state_dict(), CHECKPOINT_PATH)
+        # Early stopping
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), CHECKPOINT_PATH)
+        else:
+            patience_counter += 1
+            if patience_counter >= PATIENCE:
+                print("Early stopping triggered")
+                break
     
+    # Tải mô hình tốt nhất
+    model.load_state_dict(torch.load(CHECKPOINT_PATH))
     return model
 
 # Hàm trả lời câu hỏi
@@ -337,7 +385,8 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
                 with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
                     embed = clip_model.encode_image(img_tensor).float()
                 image_embeds.append(embed)
-            except:
+            except Exception as e:
+                print(f"Error loading image {path}: {e}")
                 continue
         if not image_embeds:
             image_embeds = [torch.zeros(1, 512).to(DEVICE)]
@@ -363,18 +412,21 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         
         num_options = len(options)
         
+        # Tinh chỉnh trọng số dựa trên loại câu hỏi
         weight_image = 0.4
         weight_text = 0.6
         if question_type in ["Onset", "Itch", "Lesion Count"]:
             weight_image, weight_text = 0.1, 0.9
-        elif question_type in ["Site Location", "Lesion Color"]:
+        elif question_type in ["Site Location", "Lesion Color", "Skin Description"]:
             weight_image, weight_text = 0.5, 0.5
         
         model.eval()
         with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
             logits = model(image_embed, query_tokens, option_tokens, num_options)
             logits = weight_image * logits + weight_text * logits
-            best_option_idx = torch.argmax(logits, dim=1).item()
+            probs = torch.softmax(logits, dim=1)
+            best_option_idx = torch.argmax(probs, dim=1).item()
+            best_option_idx = min(best_option_idx, num_options - 1)  # Giới hạn chỉ số
         
         return options[best_option_idx], best_option_idx
     except Exception as e:
@@ -403,12 +455,12 @@ def process_dataset(data_file, output_filename, question_file, model, tokenizer,
         result = {"encounter_id": encounter_id}
         
         locations = []
-        if any(k in query_content.lower() for k in ["systemic", "widespread"]):
+        if any(k in query_content.lower() for k in ["systemic", "widespread", "whole body"]):
             locations = [0, 1, 2, 3, 4, 5]
         else:
             location_map = {
-                "head": 0, "neck": 1, "arm": 2, "leg": 3, "chest": 4, "abdomen": 4, "back": 5,
-                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2
+                "head": 0, "neck": 1, "upper extremities": 2, "lower extremities": 3, "chest/abdomen": 4, "back": 5,
+                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "eyebrow": 0, "sole": 3
             }
             for loc, idx in location_map.items():
                 if loc in query_content.lower() and idx not in locations:
@@ -466,50 +518,69 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 continue
             q_data = question_dict[qid]
             question = q_data["question_en"]
+            question_type = q_data["question_type_en"]
             options = q_data["options_en"]
             pred_option = options[idx]
             
             is_correct = "Unknown"
             query_lower = query_content.lower()
             response_lower = " ".join([r["content_en"].lower() for r in responses])
+            text = query_lower + " " + response_lower
             
-            if q_data["question_type_en"] == "Onset":
-                if any(k in query_lower for k in ["month", "year", "since", "ago"]) and idx in [3, 4, 5]:
+            matched_keywords = []
+            
+            if question_type == "Onset":
+                keywords = ["hour", "day", "week", "month", "year", "since", "ago", "ten years"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["month", "year", "ten years"]) and idx in [3, 4, 5]:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                else:
-                    is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Itch":
-                if "itch" in query_lower and idx == 0:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                elif "not itch" in query_lower and idx == 1:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Site":
-                if any(k in query_lower for k in ["systemic", "widespread"]) and idx == 2:
+            elif question_type == "Itch":
+                keywords = ["itch", "pruritus", "scratch", "irritat", "not itch", "no itch"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["itch", "pruritus", "scratch"]) and idx == 0:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                elif any(k in text for k in ["not itch", "no itch"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Site Location":
+            elif question_type == "Site":
+                keywords = ["systemic", "widespread", "area", "spot", "region", "single"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["systemic", "widespread"]) and idx == 2:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in text for k in ["area", "spot"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in text for k in ["single"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif question_type == "Site Location":
                 locations = []
-                location_map = {"head": 0, "neck": 1, "arm": 2, "leg": 3, "chest": 4, "back": 5, "foot": 3}
+                location_map = {
+                    "head": 0, "neck": 1, "upper extremities": 2, "lower extremities": 3, "chest/abdomen": 4, "back": 5,
+                    "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "eyebrow": 0, "sole": 3
+                }
+                matched_keywords = [loc for loc in location_map if loc in text]
                 for loc, loc_idx in location_map.items():
-                    if loc in query_lower or loc in response_lower:
-                        if loc_idx not in locations:
-                            locations.append(loc_idx)
+                    if loc in text and loc_idx not in locations:
+                        locations.append(loc_idx)
                 q_num = int(qid.split("-")[1])
                 if q_num <= len(locations) and idx == locations[q_num - 1]:
                     is_correct = "Likely Correct"
@@ -519,74 +590,96 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Lesion Color":
-                if any(k in query_lower for k in ["pale"]) and idx == 8:
+            elif question_type == "Lesion Color":
+                keywords = ["red", "pink", "brown", "blue", "purple", "black", "white", "pale", "erythema", "purplish", "leukoplakia"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["red", "pink", "erythema"]) and idx == 2:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif "psoriasis" in response_lower and idx == 2:
+                elif any(k in text for k in ["brown"]) and idx == 3:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif any(k in query_lower for k in ["red", "pink"]) and idx == 0:
+                elif any(k in text for k in ["purple", "purplish"]) and idx == 5:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif any(k in query_lower for k in ["brown"]) and idx == 4:
+                elif any(k in text for k in ["white", "pale", "leukoplakia"]) and idx == 7:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                else:
-                    is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Lesion Count":
-                if any(k in query_lower for k in ["rash", "lesions"]) and idx == 1:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                elif any(k in query_lower for k in ["single"]) and idx == 0:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Size":
-                if any(k in query_lower for k in ["large"]) and idx == 0:
+            elif question_type == "Lesion Count":
+                keywords = ["rash", "rashes", "lesions", "spots", "multiple", "single"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["rash", "rashes", "lesions", "spots", "multiple"]) and idx == 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif any(k in query_lower for k in ["small"]) and idx == 1:
+                elif any(k in text for k in ["single"]) and idx == 0:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                else:
-                    is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Skin Description":
-                if any(k in query_lower for k in ["bump"]) and idx == 0:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                elif any(k in query_lower for k in ["flat"]) and idx == 1:
-                    is_correct = "Likely Correct"
-                    correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Texture":
-                if any(k in query_lower for k in ["smooth"]) and idx == 0:
+            elif question_type == "Size":
+                keywords = ["large", "small", "thumb", "palm", "bigger", "nail"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["large", "bigger"]) and idx == 2:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif any(k in query_lower for k in ["rough"]) and idx == 1:
+                elif any(k in text for k in ["small", "nail"]) and idx == 0:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                elif any(k in text for k in ["palm"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif question_type == "Skin Description":
+                keywords = ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weeping", "raised", "swollen", "atrophy", "keratosis", "peeling", "exudation"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["bump", "raised", "swollen"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in text for k in ["flat", "macula"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in text for k in ["sunken", "atrophy"]) and idx == 2:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in text for k in ["thick", "keratosis"]) and idx == 3:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in text for k in ["weeping", "exudation"]) and idx == 8:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif question_type == "Texture":
+                keywords = ["smooth", "rough", "scales", "scaly", "peeling"]
+                matched_keywords = [k for k in keywords if k in text]
+                if any(k in text for k in ["smooth", "no scales"]) and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif any(k in text for k in ["rough", "scales", "scaly", "peeling"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
             
-            print(f"Q: {question} -> Predicted: {pred_option} ({is_correct})")
+            print(f"Q: {question} -> Predicted: {pred_option} ({is_correct}) | Matched Keywords: {matched_keywords}")
             total_questions += 1
         
         print(f"Estimated Accuracy for {enc_id}: {correct_count / total_questions:.2f}")
@@ -605,10 +698,12 @@ def validate_output(output_file, question_file):
             for qid in qids:
                 assert qid in res, f"Missing {qid}"
                 assert isinstance(res[qid], int), f"{qid} not integer"
-                assert 0 <= res[qid] < len(questions[0]["options_en"]), f"Invalid index for {qid}"
+                q_data = next(q for q in questions if q["qid"] == qid)
+                assert 0 <= res[qid] < len(q_data["options_en"]), f"Invalid index {res[qid]} for {qid}"
         print(f"Output {output_file} is valid")
     except Exception as e:
         print(f"Validation error for {output_file}: {e}")
+        raise
 
 # Hàm chính
 def main():
@@ -617,6 +712,10 @@ def main():
         
         print("Fine-tuning CLIP + DistilBERT...")
         model = fine_tune_model()
+        
+        # Tăng tốc inference nếu tương thích
+        if torch.__version__ >= "2.0":
+            model = torch.compile(model)
         
         valid_results, valid_data, question_dict = process_dataset(VALID_FILE, "closed_qa_valid_results.json", QUESTION_FILE, model, tokenizer, clip_model)
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_valid_results.json"), QUESTION_FILE)
