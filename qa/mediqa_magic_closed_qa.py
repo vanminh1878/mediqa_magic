@@ -10,10 +10,7 @@ from tqdm import tqdm
 import numpy as np
 from torch.amp import autocast, GradScaler
 from torch.utils.data import Dataset, DataLoader
-import torch.multiprocessing as mp
-
-# Đặt phương thức khởi tạo tiến trình
-mp.set_start_method('spawn', force=True)
+import torchvision.transforms as T
 
 # Cấu hình
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -24,15 +21,16 @@ VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
 TEST_FILE = "/kaggle/input/mediqa-data/mediqa-data/test.json"
 QUESTION_FILE = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
 OUTPUT_DIR = "/kaggle/working"
-BATCH_SIZE = 8  
+BATCH_SIZE = 8
 LEARNING_RATE = 1e-5
-EPOCHS = 5  # Tăng để học tốt hơn
+EPOCHS = 7
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
 MAX_IMAGES = 5
 MAX_LENGTH = 128
-PATIENCE = 2  # Early stopping
+PATIENCE = 2
+ACCUMULATION_STEPS = 2  # Tích lũy gradient
 
-# Xóa cache CUDA và bật expandable_segments
+# Xóa cache CUDA
 torch.cuda.empty_cache()
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TF_LOGGING"] = "ERROR"
@@ -51,6 +49,15 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load models: {e}")
 
+# Thêm augmentation cho ảnh
+preprocess = T.Compose([
+    T.Resize((224, 224)),
+    T.RandomHorizontalFlip(p=0.5),
+    T.RandomCrop(224, padding=4),
+    T.ToTensor(),
+    T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+])
+
 # Hàm trích xuất nhãn
 def extract_labels(query_content, responses, question_dict):
     query_lower = query_content.lower()
@@ -61,7 +68,7 @@ def extract_labels(query_content, responses, question_dict):
     for qid, q_data in question_dict.items():
         question_type = q_data["question_type_en"]
         options = q_data["options_en"]
-        label = len(options) - 1  # Mặc định là Not mentioned
+        label = len(options) - 1
         
         if question_type == "Onset":
             if any(k in text for k in ["hour"]):
@@ -72,7 +79,7 @@ def extract_labels(query_content, responses, question_dict):
                 label = 2
             elif any(k in text for k in ["month", "six months"]):
                 label = 3
-            elif any(k in text for k in ["year"]):
+            elif any(k in text for k in ["year", "ago"]):
                 label = 4
             elif any(k in text for k in ["ten years", "multiple years"]):
                 label = 5
@@ -84,7 +91,7 @@ def extract_labels(query_content, responses, question_dict):
         elif question_type == "Site":
             if any(k in text for k in ["systemic", "widespread", "whole body"]):
                 label = 2
-            elif any(k in text for k in ["area", "spot", "region"]):
+            elif any(k in text for k in ["area", "spot", "region", "rashes"]):
                 label = 1
             elif any(k in text for k in ["single"]):
                 label = 0
@@ -93,7 +100,7 @@ def extract_labels(query_content, responses, question_dict):
             location_map = {
                 "head": 0, "neck": 1, "upper extremities": 2, "lower extremities": 3, "chest/abdomen": 4, "back": 5,
                 "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "thumb": 2, "arm": 2, "leg": 3,
-                "chest": 4, "abdomen": 4, "eyebrow": 0, "sole": 3
+                "chest": 4, "abdomen": 4, "eyebrow": 0, "sole": 3, "toe": 3
             }
             for loc, idx in location_map.items():
                 if loc in text and idx not in locations:
@@ -108,7 +115,7 @@ def extract_labels(query_content, responses, question_dict):
                 label = 3
             elif any(k in text for k in ["blue"]):
                 label = 4
-            elif any(k in text for k in ["purple", "purplish"]):
+            elif any(k in text for k in ["purple", "purplish", "hematoma"]):
                 label = 5
             elif any(k in text for k in ["black"]):
                 label = 6
@@ -121,7 +128,7 @@ def extract_labels(query_content, responses, question_dict):
             elif any(k in text for k in ["hypopigmentation"]):
                 label = 10
         elif question_type == "Lesion Count":
-            if any(k in text for k in ["rash", "rashes", "lesions", "spots", "multiple"]):
+            if any(k in text for k in ["rash", "rashes", "lesions", "spots", "multiple", "hives"]):
                 label = 1
             elif any(k in text for k in ["single", "one"]):
                 label = 0
@@ -133,7 +140,7 @@ def extract_labels(query_content, responses, question_dict):
             elif any(k in text for k in ["palm"]):
                 label = 1
         elif question_type == "Skin Description":
-            if any(k in text for k in ["bump", "raised", "swollen"]):
+            if any(k in text for k in ["bump", "raised", "swollen", "hives", "urticaria"]):
                 label = 0
             elif any(k in text for k in ["flat", "macula"]):
                 label = 1
@@ -145,7 +152,7 @@ def extract_labels(query_content, responses, question_dict):
                 label = 4
             elif any(k in text for k in ["wart"]):
                 label = 5
-            elif any(k in text for k in ["crust", "peeling"]):
+            elif any(k in text for k in ["crust", "peeling", "layered", "exfoliative"]):
                 label = 6
             elif any(k in text for k in ["scab"]):
                 label = 7
@@ -154,7 +161,7 @@ def extract_labels(query_content, responses, question_dict):
         elif question_type == "Texture":
             if any(k in text for k in ["smooth", "no scales"]):
                 label = 0
-            elif any(k in text for k in ["rough", "scaly", "scales", "peeling"]):
+            elif any(k in text for k in ["rough", "scaly", "scales", "peeling", "exfoliative"]):
                 label = 1
         
         labels[qid] = label
@@ -162,26 +169,28 @@ def extract_labels(query_content, responses, question_dict):
     return labels
 
 # Hàm kiểm tra "Not mentioned"
-def check_not_mentioned(query_content, question_type):
+def check_not_mentioned(query_content, responses, question_type):
     query_lower = query_content.lower()
+    response_text = " ".join([r["content_en"].lower() for r in responses]).lower()
+    text = query_lower + " " + response_text
     if question_type == "Onset":
-        return not any(k in query_lower for k in ["hour", "day", "week", "month", "year", "since", "ago", "ten years"])
+        return not any(k in text for k in ["hour", "day", "week", "month", "year", "since", "ago", "ten years"])
     if question_type == "Itch":
-        return not any(k in query_lower for k in ["itch", "scratch", "irritat", "pruritus", "not itch", "no itch"])
+        return not any(k in text for k in ["itch", "scratch", "irritat", "pruritus", "not itch", "no itch"])
     if question_type == "Site":
-        return not any(k in query_lower for k in ["area", "spot", "region", "widespread", "systemic", "single"])
+        return not any(k in text for k in ["area", "spot", "region", "widespread", "systemic", "single", "rashes"])
     if question_type == "Site Location":
-        return not any(k in query_lower for k in ["head", "neck", "arm", "leg", "chest", "abdomen", "back", "hand", "foot", "thigh", "palm", "lip", "finger", "eyebrow", "sole"])
+        return not any(k in text for k in ["head", "neck", "arm", "leg", "chest", "abdomen", "back", "hand", "foot", "thigh", "palm", "lip", "finger", "eyebrow", "sole", "toe"])
     if question_type == "Size":
-        return not any(k in query_lower for k in ["size", "large", "small", "thumb", "palm", "bigger", "nail"])
+        return not any(k in text for k in ["size", "large", "small", "thumb", "palm", "bigger", "nail"])
     if question_type == "Skin Description":
-        return not any(k in query_lower for k in ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weep", "lesion", "raised", "swollen", "atrophy", "keratosis", "peeling", "exudation"])
+        return not any(k in text for k in ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weep", "lesion", "raised", "swollen", "atrophy", "keratosis", "peeling", "exudation", "hives", "urticaria", "layered", "exfoliative"])
     if question_type == "Lesion Color":
-        return not any(k in query_lower for k in ["color", "red", "pink", "brown", "blue", "purple", "black", "white", "pigment", "pale", "erythema", "purplish", "leukoplakia"])
+        return not any(k in text for k in ["color", "red", "pink", "brown", "blue", "purple", "black", "white", "pigment", "pale", "erythema", "purplish", "leukoplakia", "hematoma"])
     if question_type == "Lesion Count":
-        return not any(k in query_lower for k in ["single", "multiple", "many", "few", "rash", "rashes", "lesions", "spots"])
+        return not any(k in text for k in ["single", "multiple", "many", "few", "rash", "rashes", "lesions", "spots", "hives"])
     if question_type == "Texture":
-        return not any(k in query_lower for k in ["smooth", "rough", "texture", "scales", "scaly", "peeling"])
+        return not any(k in text for k in ["smooth", "rough", "texture", "scales", "scaly", "peeling", "exfoliative"])
     return True
 
 # Mô hình kết hợp CLIP và DistilBERT
@@ -191,18 +200,13 @@ class ClipBertModel(nn.Module):
         self.clip_model = clip_model
         self.bert_model = bert_model
         self.image_projection = nn.Linear(512, 768)
-        self.dropout = nn.Dropout(0.3)  # Thêm dropout
+        self.dropout = nn.Dropout(0.3)
         self.fc = nn.Linear(768 + 768, max_options)
 
     def forward(self, image_embeds, query_tokens, option_tokens, num_options):
         with autocast(device_type=DEVICE_TYPE):
-            # Nhúng query
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
-            
-            # Biến đổi image_embeds
             image_embeds = self.image_projection(image_embeds).float()
-            
-            # Nhúng option_tokens
             batch_size = image_embeds.size(0)
             option_input_ids = option_tokens["input_ids"].reshape(batch_size * num_options, -1)
             option_attention_mask = option_tokens["attention_mask"].reshape(batch_size * num_options, -1)
@@ -210,15 +214,13 @@ class ClipBertModel(nn.Module):
                 input_ids=option_input_ids,
                 attention_mask=option_attention_mask
             ).last_hidden_state[:, 0, :].float()
-            
-            # Reshape option_embeds
             option_embeds = option_embeds.reshape(batch_size, num_options, -1).mean(dim=1)
         
-        # Kết hợp embedding
         combined_embed = image_embeds + query_embeds
         combined_embed = self.dropout(combined_embed)
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
-        return logits[:, :num_options]  # Cắt logits theo num_options thực tế
+        logits = logits[:, :num_options]
+        return logits
 
 # Dataset cho tinh chỉnh
 class MediqaDataset(Dataset):
@@ -291,25 +293,18 @@ class MediqaDataset(Dataset):
             "encounter_id": encounter_id
         }
 
-# Hàm collate_fn để chuẩn hóa batch
+# Hàm collate_fn
 def collate_fn(batch):
     image_embeds = torch.cat([item["image_embeds"] for item in batch], dim=0)
-    
     query_input_ids = torch.stack([item["query_tokens"]["input_ids"] for item in batch])
     query_attention_mask = torch.stack([item["query_tokens"]["attention_mask"] for item in batch])
-    query_tokens = {
-        "input_ids": query_input_ids,
-        "attention_mask": query_attention_mask
-    }
+    query_tokens = {"input_ids": query_input_ids, "attention_mask": query_attention_mask}
     
     option_texts = {}
     for qid in batch[0]["option_texts"]:
         option_input_ids = torch.stack([item["option_texts"][qid]["input_ids"] for item in batch])
         option_attention_mask = torch.stack([item["option_texts"][qid]["attention_mask"] for item in batch])
-        option_texts[qid] = {
-            "input_ids": option_input_ids,
-            "attention_mask": option_attention_mask
-        }
+        option_texts[qid] = {"input_ids": option_input_ids, "attention_mask": option_attention_mask}
     
     labels = {}
     for qid in batch[0]["labels"]:
@@ -328,10 +323,11 @@ def collate_fn(batch):
 # Tinh chỉnh mô hình
 def fine_tune_model():
     dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR, clip_model)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
     model = ClipBertModel(clip_model, bert_model, max_options=12).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scaler = torch.amp.GradScaler('cuda')
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1)
+    scaler = GradScaler('cuda')
     
     best_loss = float('inf')
     patience_counter = 0
@@ -339,28 +335,33 @@ def fine_tune_model():
     for epoch in range(EPOCHS):
         model.train()
         total_loss = 0
-        for batch in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{EPOCHS}"):
+        for i, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch + 1}/{EPOCHS}")):
             image_embeds = batch["image_embeds"]
             query_tokens = batch["query_tokens"]
             option_texts = batch["option_texts"]
             labels = batch["labels"]
             
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             with autocast(device_type=DEVICE_TYPE):
                 loss = 0
                 for qid in option_texts:
                     num_options = option_texts[qid]["input_ids"].size(1)
                     logits = model(image_embeds, query_tokens, option_texts[qid], num_options)
                     loss += nn.CrossEntropyLoss()(logits, labels[qid])
+                loss = loss / ACCUMULATION_STEPS
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            total_loss += loss.item()
+            
+            if (i + 1) % ACCUMULATION_STEPS == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+            
+            total_loss += loss.item() * ACCUMULATION_STEPS
         
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}")
+        scheduler.step(avg_loss)
         
-        # Early stopping
         if avg_loss < best_loss:
             best_loss = avg_loss
             patience_counter = 0
@@ -371,14 +372,13 @@ def fine_tune_model():
                 print("Early stopping triggered")
                 break
     
-    # Tải mô hình tốt nhất
-    model.load_state_dict(torch.load(CHECKPOINT_PATH))
+    model.load_state_dict(torch.load(CHECKPOINT_PATH, weights_only=True))
     return model
 
 # Hàm trả lời câu hỏi
-def answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer, clip_model):
+def answer_with_clip_bert(model, image_paths, query_content, responses, question, question_type, options, tokenizer, clip_model):
     try:
-        if check_not_mentioned(query_content, question_type):
+        if check_not_mentioned(query_content, responses, question_type):
             return options[-1], len(options) - 1
         
         image_embeds = []
@@ -416,13 +416,12 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         
         num_options = len(options)
         
-        # Tinh chỉnh trọng số dựa trên loại câu hỏi
         weight_image = 0.4
         weight_text = 0.6
         if question_type in ["Onset", "Itch", "Lesion Count"]:
             weight_image, weight_text = 0.1, 0.9
         elif question_type in ["Site Location", "Lesion Color", "Skin Description"]:
-            weight_image, weight_text = 0.5, 0.5
+            weight_image, weight_text = 0.7, 0.3
         
         model.eval()
         with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
@@ -430,7 +429,7 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
             logits = weight_image * logits + weight_text * logits
             probs = torch.softmax(logits, dim=1)
             best_option_idx = torch.argmax(probs, dim=1).item()
-            best_option_idx = min(best_option_idx, num_options - 1)  # Giới hạn chỉ số
+            best_option_idx = min(best_option_idx, num_options - 1)
         
         return options[best_option_idx], best_option_idx
     except Exception as e:
@@ -455,6 +454,7 @@ def process_dataset(data_file, output_filename, question_file, model, tokenizer,
         image_ids = case["image_ids"]
         image_paths = [os.path.join(IMAGE_DIR, img_id) for img_id in image_ids]
         query_content = case.get("query_content_en", "")
+        responses = case.get("responses", [])
         
         result = {"encounter_id": encounter_id}
         
@@ -464,7 +464,7 @@ def process_dataset(data_file, output_filename, question_file, model, tokenizer,
         else:
             location_map = {
                 "head": 0, "neck": 1, "upper extremities": 2, "lower extremities": 3, "chest/abdomen": 4, "back": 5,
-                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "eyebrow": 0, "sole": 3
+                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "eyebrow": 0, "sole": 3, "toe": 3
             }
             for loc, idx in location_map.items():
                 if loc in query_content.lower() and idx not in locations:
@@ -483,7 +483,7 @@ def process_dataset(data_file, output_filename, question_file, model, tokenizer,
                 else:
                     result[qid] = len(options) - 1
             else:
-                _, clip_idx = answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer, clip_model)
+                _, clip_idx = answer_with_clip_bert(model, image_paths, query_content, responses, question, question_type, options, tokenizer, clip_model)
                 result[qid] = clip_idx
         
         results.append(result)
@@ -536,10 +536,13 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
             if question_type == "Onset":
                 keywords = ["hour", "day", "week", "month", "year", "since", "ago", "ten years"]
                 matched_keywords = [k for k in keywords if k in text]
-                if any(k in text for k in ["month", "year", "ten years"]) and idx in [3, 4, 5]:
+                if any(k in text for k in ["month", "year", "ago"]) and idx in [3, 4, 5]:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif any(k in text for k in ["day"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
@@ -553,24 +556,24 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 elif any(k in text for k in ["not itch", "no itch"]) and idx == 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
             elif question_type == "Site":
-                keywords = ["systemic", "widespread", "area", "spot", "region", "single"]
+                keywords = ["systemic", "widespread", "area", "spot", "region", "single", "rashes"]
                 matched_keywords = [k for k in keywords if k in text]
                 if any(k in text for k in ["systemic", "widespread"]) and idx == 2:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif any(k in text for k in ["area", "spot"]) and idx == 1:
+                elif any(k in text for k in ["area", "spot", "rashes"]) and idx == 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 elif any(k in text for k in ["single"]) and idx == 0:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
@@ -579,7 +582,7 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 locations = []
                 location_map = {
                     "head": 0, "neck": 1, "upper extremities": 2, "lower extremities": 3, "chest/abdomen": 4, "back": 5,
-                    "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "eyebrow": 0, "sole": 3
+                    "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "eyebrow": 0, "sole": 3, "toe": 3
                 }
                 matched_keywords = [loc for loc in location_map if loc in text]
                 for loc, loc_idx in location_map.items():
@@ -595,7 +598,7 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 else:
                     is_correct = "Possibly Incorrect"
             elif question_type == "Lesion Color":
-                keywords = ["red", "pink", "brown", "blue", "purple", "black", "white", "pale", "erythema", "purplish", "leukoplakia"]
+                keywords = ["red", "pink", "brown", "blue", "purple", "black", "white", "pale", "erythema", "purplish", "leukoplakia", "hematoma"]
                 matched_keywords = [k for k in keywords if k in text]
                 if any(k in text for k in ["red", "pink", "erythema"]) and idx == 2:
                     is_correct = "Likely Correct"
@@ -603,27 +606,27 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 elif any(k in text for k in ["brown"]) and idx == 3:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif any(k in text for k in ["purple", "purplish"]) and idx == 5:
+                elif any(k in text for k in ["purple", "purplish", "hematoma"]) and idx == 5:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 elif any(k in text for k in ["white", "pale", "leukoplakia"]) and idx == 7:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
             elif question_type == "Lesion Count":
-                keywords = ["rash", "rashes", "lesions", "spots", "multiple", "single"]
+                keywords = ["rash", "rashes", "lesions", "spots", "multiple", "single", "hives"]
                 matched_keywords = [k for k in keywords if k in text]
-                if any(k in text for k in ["rash", "rashes", "lesions", "spots", "multiple"]) and idx == 1:
+                if any(k in text for k in ["rash", "rashes", "lesions", "spots", "multiple", "hives"]) and idx == 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 elif any(k in text for k in ["single"]) and idx == 0:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
@@ -640,15 +643,15 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 elif any(k in text for k in ["palm"]) and idx == 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
             elif question_type == "Skin Description":
-                keywords = ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weeping", "raised", "swollen", "atrophy", "keratosis", "peeling", "exudation"]
+                keywords = ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weeping", "raised", "swollen", "atrophy", "keratosis", "peeling", "exudation", "hives", "urticaria", "layered", "exfoliative"]
                 matched_keywords = [k for k in keywords if k in text]
-                if any(k in text for k in ["bump", "raised", "swollen"]) and idx == 0:
+                if any(k in text for k in ["bump", "raised", "swollen", "hives", "urticaria"]) and idx == 0:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 elif any(k in text for k in ["flat", "macula"]) and idx == 1:
@@ -660,24 +663,27 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
                 elif any(k in text for k in ["thick", "keratosis"]) and idx == 3:
                     is_correct = "Likely Correct"
                     correct_count += 1
+                elif any(k in text for k in ["crust", "peeling", "layered", "exfoliative"]) and idx == 6:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
                 elif any(k in text for k in ["weeping", "exudation"]) and idx == 8:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
             elif question_type == "Texture":
-                keywords = ["smooth", "rough", "scales", "scaly", "peeling"]
+                keywords = ["smooth", "rough", "scales", "scaly", "peeling", "exfoliative"]
                 matched_keywords = [k for k in keywords if k in text]
                 if any(k in text for k in ["smooth", "no scales"]) and idx == 0:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif any(k in text for k in ["rough", "scales", "scaly", "peeling"]) and idx == 1:
+                elif any(k in text for k in ["rough", "scales", "scaly", "peeling", "exfoliative"]) and idx == 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
-                elif check_not_mentioned(query_content, question_type) and idx == len(options) - 1:
+                elif check_not_mentioned(query_content, responses, question_type) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
@@ -703,7 +709,7 @@ def validate_output(output_file, question_file):
                 assert qid in res, f"Missing {qid}"
                 assert isinstance(res[qid], int), f"{qid} not integer"
                 q_data = next(q for q in questions if q["qid"] == qid)
-                assert 0 <= res[qid] < len(q_data["options_en"]), f"Invalid index {res[qid]} for {qid}"
+                assert 0 <= res[qid] < len(q_data["options_en"]), f"Invalid index {res[qid]} for {qid} (max: {len(q_data['options_en']) - 1})"
         print(f"Output {output_file} is valid")
     except Exception as e:
         print(f"Validation error for {output_file}: {e}")
@@ -712,16 +718,10 @@ def validate_output(output_file, question_file):
 # Hàm chính
 def main():
     try:
-        # Đặt phương thức spawn cho multiprocessing
-        mp.set_start_method('spawn', force=True)
         print(f"PyTorch version: {torch.__version__}")
         
         print("Fine-tuning CLIP + DistilBERT...")
         model = fine_tune_model()
-        
-        # Tăng tốc inference nếu tương thích
-        if torch.__version__ >= "2.0":
-            model = torch.compile(model)
         
         valid_results, valid_data, question_dict = process_dataset(VALID_FILE, "closed_qa_valid_results.json", QUESTION_FILE, model, tokenizer, clip_model)
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_valid_results.json"), QUESTION_FILE)
