@@ -20,15 +20,16 @@ VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
 TEST_FILE = "/kaggle/input/mediqa-data/mediqa-data/test.json"
 QUESTION_FILE = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
 OUTPUT_DIR = "/kaggle/working"
-BATCH_SIZE = 32
+BATCH_SIZE = 16  # Giảm batch size để tránh lỗi bộ nhớ
 LEARNING_RATE = 1e-5
 EPOCHS = 3
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
 MAX_IMAGES = 5
 MAX_LENGTH = 128
 
-# Xóa cache CUDA
+# Xóa cache CUDA và giảm thiểu cảnh báo
 torch.cuda.empty_cache()
+os.environ["TF_LOGGING"] = "ERROR"
 
 # Kiểm tra file tồn tại
 for f in [QUESTION_FILE, TRAIN_FILE, VALID_FILE, TEST_FILE]:
@@ -137,9 +138,27 @@ class ClipBertModel(nn.Module):
 
     def forward(self, image_embeds, query_tokens, option_tokens):
         with autocast(device_type=DEVICE_TYPE):
+            # Xử lý query_tokens
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
-            option_embeds = self.bert_model(**option_tokens).last_hidden_state[:, 0, :].float()
+            
+            # Xử lý từng tùy chọn trong option_tokens
+            batch_size = image_embeds.size(0)
+            num_options = option_tokens["input_ids"].size(1)
+            option_embeds = []
+            
+            for i in range(num_options):
+                single_option_tokens = {
+                    "input_ids": option_tokens["input_ids"][:, i, :],
+                    "attention_mask": option_tokens["attention_mask"][:, i, :]
+                }
+                embed = self.bert_model(**single_option_tokens).last_hidden_state[:, 0, :].float()
+                option_embeds.append(embed)
+            
+            # Gộp các embedding của tùy chọn
+            option_embeds = torch.stack(option_embeds, dim=1)  # [batch_size, num_options, 768]
+            option_embeds = option_embeds.mean(dim=1)  # Lấy trung bình để khớp kích thước với query_embeds
         
+        # Kết hợp embedding
         combined_embed = image_embeds + query_embeds
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
         return logits
