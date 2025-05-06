@@ -134,12 +134,17 @@ class ClipBertModel(nn.Module):
         super().__init__()
         self.clip_model = clip_model
         self.bert_model = bert_model
-        self.fc = nn.Linear(512 + 768, num_options)
+        # Thêm lớp tuyến tính để biến đổi image_embeds từ 512 sang 768
+        self.image_projection = nn.Linear(512, 768)
+        self.fc = nn.Linear(768 + 768, num_options)  # Cập nhật kích thước đầu vào của fc
 
     def forward(self, image_embeds, query_tokens, option_tokens):
         with autocast(device_type=DEVICE_TYPE):
             # Xử lý query_tokens
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
+            
+            # Biến đổi image_embeds để khớp kích thước với query_embeds
+            image_embeds = self.image_projection(image_embeds).float()
             
             # Xử lý từng tùy chọn trong option_tokens
             batch_size = image_embeds.size(0)
@@ -156,8 +161,8 @@ class ClipBertModel(nn.Module):
             
             # Gộp các embedding của tùy chọn
             option_embeds = torch.stack(option_embeds, dim=1)  # [batch_size, num_options, 768]
-            option_embeds = option_embeds.mean(dim=1)  # Lấy trung bình để khớp kích thước với query_embeds
-        
+            option_embeds = option_embeds.mean(dim=1)  # Lấy trung bình để khớp kích thước
+            
         # Kết hợp embedding
         combined_embed = image_embeds + query_embeds
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
