@@ -20,15 +20,16 @@ VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
 TEST_FILE = "/kaggle/input/mediqa-data/mediqa-data/test.json"
 QUESTION_FILE = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
 OUTPUT_DIR = "/kaggle/working"
-BATCH_SIZE = 16  # Giảm batch size để tránh lỗi bộ nhớ
+BATCH_SIZE = 8  # Giảm từ 16 xuống 8 để tránh OOM
 LEARNING_RATE = 1e-5
 EPOCHS = 3
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
 MAX_IMAGES = 5
 MAX_LENGTH = 128
 
-# Xóa cache CUDA và giảm thiểu cảnh báo
+# Xóa cache CUDA và bật expandable_segments
 torch.cuda.empty_cache()
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TF_LOGGING"] = "ERROR"
 
 # Kiểm tra file tồn tại
@@ -134,19 +135,14 @@ class ClipBertModel(nn.Module):
         super().__init__()
         self.clip_model = clip_model
         self.bert_model = bert_model
-        # Thêm lớp tuyến tính để biến đổi image_embeds từ 512 sang 768
         self.image_projection = nn.Linear(512, 768)
-        self.fc = nn.Linear(768 + 768, num_options)  # Cập nhật kích thước đầu vào của fc
+        self.fc = nn.Linear(768 + 768, num_options)
 
     def forward(self, image_embeds, query_tokens, option_tokens):
         with autocast(device_type=DEVICE_TYPE):
-            # Xử lý query_tokens
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
-            
-            # Biến đổi image_embeds để khớp kích thước với query_embeds
             image_embeds = self.image_projection(image_embeds).float()
             
-            # Xử lý từng tùy chọn trong option_tokens
             batch_size = image_embeds.size(0)
             num_options = option_tokens["input_ids"].size(1)
             option_embeds = []
@@ -159,11 +155,8 @@ class ClipBertModel(nn.Module):
                 embed = self.bert_model(**single_option_tokens).last_hidden_state[:, 0, :].float()
                 option_embeds.append(embed)
             
-            # Gộp các embedding của tùy chọn
-            option_embeds = torch.stack(option_embeds, dim=1)  # [batch_size, num_options, 768]
-            option_embeds = option_embeds.mean(dim=1)  # Lấy trung bình để khớp kích thước
-            
-        # Kết hợp embedding
+            option_embeds = torch.stack(option_embeds, dim=1).mean(dim=1)
+        
         combined_embed = image_embeds + query_embeds
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
         return logits
@@ -191,7 +184,6 @@ class MediqaDataset(Dataset):
         responses = case.get("responses", [])
         image_paths = [os.path.join(self.image_dir, img_id) for img_id in image_ids]
         
-        # Tải và nhúng hình ảnh
         image_embeds = []
         for path in image_paths[:MAX_IMAGES]:
             try:
@@ -206,7 +198,6 @@ class MediqaDataset(Dataset):
             image_embeds = [torch.zeros(1, 512).to(DEVICE)]
         image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)
         
-        # Token hóa văn bản truy vấn
         query_tokens = self.tokenizer(
             query_content,
             return_tensors="pt",
@@ -216,10 +207,8 @@ class MediqaDataset(Dataset):
         )
         query_tokens = {k: v.squeeze(0).to(DEVICE) for k, v in query_tokens.items()}
         
-        # Trích xuất nhãn
         labels = extract_labels(query_content, responses, self.question_dict)
         
-        # Chuẩn bị tùy chọn
         option_texts = {}
         for qid, q_data in self.question_dict.items():
             options = q_data["options_en"]
@@ -246,7 +235,6 @@ class MediqaDataset(Dataset):
 def collate_fn(batch):
     image_embeds = torch.cat([item["image_embeds"] for item in batch], dim=0)
     
-    # Chuẩn hóa query_tokens
     query_input_ids = torch.stack([item["query_tokens"]["input_ids"] for item in batch])
     query_attention_mask = torch.stack([item["query_tokens"]["attention_mask"] for item in batch])
     query_tokens = {
@@ -254,7 +242,6 @@ def collate_fn(batch):
         "attention_mask": query_attention_mask
     }
     
-    # Chuẩn hóa option_texts
     option_texts = {}
     for qid in batch[0]["option_texts"]:
         option_input_ids = torch.stack([item["option_texts"][qid]["input_ids"] for item in batch])
@@ -264,7 +251,6 @@ def collate_fn(batch):
             "attention_mask": option_attention_mask
         }
     
-    # Chuẩn hóa labels
     labels = {}
     for qid in batch[0]["labels"]:
         labels[qid] = torch.stack([item["labels"][qid] for item in batch])
@@ -309,7 +295,6 @@ def fine_tune_model():
         
         print(f"Epoch {epoch + 1}, Loss: {total_loss / len(dataloader):.4f}")
         
-        # Lưu checkpoint
         torch.save(model.state_dict(), CHECKPOINT_PATH)
     
     return model
@@ -320,7 +305,6 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         if check_not_mentioned(query_content, question_type):
             return options[-1], len(options) - 1
         
-        # Tải và nhúng hình ảnh
         image_embeds = []
         for path in image_paths[:MAX_IMAGES]:
             try:
@@ -335,7 +319,6 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
             image_embeds = [torch.zeros(1, 512).to(DEVICE)]
         image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)
         
-        # Token hóa văn bản
         query_tokens = tokenizer(
             query_content,
             return_tensors="pt",
@@ -353,7 +336,6 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         )
         option_tokens = {k: v.to(DEVICE) for k, v in option_tokens.items()}
         
-        # Điều chỉnh trọng số
         weight_image = 0.3
         weight_text = 0.7
         if question_type in ["Onset", "Itch", "Lesion Count"]:
@@ -361,7 +343,6 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         elif question_type in ["Site Location", "Lesion Color"]:
             weight_image, weight_text = 0.5, 0.5
         
-        # Dự đoán
         model.eval()
         with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
             logits = model(image_embed, query_tokens, option_tokens)
@@ -566,28 +547,23 @@ def validate_output(output_file, question_file):
 # Hàm chính
 def main():
     try:
-        # In phiên bản PyTorch để kiểm tra
         print(f"PyTorch version: {torch.__version__}")
         
-        # Tinh chỉnh mô hình
         print("Fine-tuning CLIP + DistilBERT...")
         model = fine_tune_model()
         
-        # Xử lý tập valid
         valid_results, valid_data, question_dict = process_dataset(VALID_FILE, "closed_qa_valid_results.json", QUESTION_FILE, model, tokenizer, clip_model)
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_valid_results.json"), QUESTION_FILE)
         
-        # Xử lý tập test
-        test_results, test_data, question_dict = process_dataset(TEST_FILE, "closed_qa_test_results.json", QUESTION_FILE, model, tokenizer, clip_model)
+        test_results, test_data, _ = process_dataset(TEST_FILE, "closed_qa_test_results.json", QUESTION_FILE, model, tokenizer, clip_model)
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_test_results.json"), QUESTION_FILE)
         
-        # Đánh giá thủ công
         print("\nEvaluating valid set samples:")
         manual_evaluation(valid_results, valid_data, question_dict, num_samples=5)
         
     except Exception as e:
         print(f"Error in main: {e}")
-        raise  # Raise the exception for debugging
+        raise
 
 if __name__ == "__main__":
     main()
