@@ -13,6 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 
 # Cấu hình
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE_TYPE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_DIR = "/kaggle/input/mediqa-data/mediqa-data/images"
 TRAIN_FILE = "/kaggle/input/mediqa-data/mediqa-data/train_cvqa.json"
 VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
@@ -135,7 +136,7 @@ class ClipBertModel(nn.Module):
         self.fc = nn.Linear(512 + 768, num_options)
 
     def forward(self, image_embeds, query_tokens, option_tokens):
-        with autocast():
+        with autocast(device_type=DEVICE_TYPE):
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
             option_embeds = self.bert_model(**option_tokens).last_hidden_state[:, 0, :].float()
         
@@ -172,7 +173,7 @@ class MediqaDataset(Dataset):
             try:
                 img = Image.open(path).convert("RGB")
                 img_tensor = preprocess(img).unsqueeze(0).to(DEVICE)
-                with torch.no_grad(), autocast():
+                with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
                     embed = self.clip_model.encode_image(img_tensor).float()
                 image_embeds.append(embed)
             except:
@@ -272,7 +273,7 @@ def fine_tune_model():
             labels = batch["labels"]
             
             optimizer.zero_grad()
-            with autocast():
+            with autocast(device_type=DEVICE_TYPE):
                 loss = 0
                 for qid in option_texts:
                     logits = model(image_embeds, query_tokens, option_texts[qid])
@@ -301,7 +302,7 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
             try:
                 img = Image.open(path).convert("RGB")
                 img_tensor = preprocess(img).unsqueeze(0).to(DEVICE)
-                with torch.no_grad(), autocast():
+                with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
                     embed = clip_model.encode_image(img_tensor).float()
                 image_embeds.append(embed)
             except:
@@ -338,7 +339,7 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         
         # Dự đoán
         model.eval()
-        with torch.no_grad(), autocast():
+        with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
             logits = model(image_embed, query_tokens, option_tokens)
             logits = weight_image * logits + weight_text * logits
             best_option_idx = torch.argmax(logits, dim=-1).item()
@@ -541,6 +542,9 @@ def validate_output(output_file, question_file):
 # Hàm chính
 def main():
     try:
+        # In phiên bản PyTorch để kiểm tra
+        print(f"PyTorch version: {torch.__version__}")
+        
         # Tinh chỉnh mô hình
         print("Fine-tuning CLIP + DistilBERT...")
         model = fine_tune_model()
