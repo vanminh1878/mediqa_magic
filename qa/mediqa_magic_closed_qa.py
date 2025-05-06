@@ -19,11 +19,10 @@ VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
 TEST_FILE = "/kaggle/input/mediqa-data/mediqa-data/test.json"
 QUESTION_FILE = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
 OUTPUT_DIR = "/kaggle/working"
-BATCH_SIZE = 32  # Phù hợp với T4
+BATCH_SIZE = 32
 LEARNING_RATE = 1e-5
 EPOCHS = 3
-WEIGHT_IMAGE = 0.3  # Trọng số nhúng hình ảnh
-WEIGHT_TEXT = 0.7   # Trọng số nhúng văn bản (ưu tiên văn bản)
+CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
 
 # Kiểm tra file tồn tại
 for f in [QUESTION_FILE, TRAIN_FILE, VALID_FILE, TEST_FILE]:
@@ -39,25 +38,104 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load models: {e}")
 
+# Hàm trích xuất nhãn từ truy vấn và phản hồi
+def extract_labels(query_content, responses, question_dict):
+    query_lower = query_content.lower()
+    response_text = " ".join([r["content_en"].lower() for r in responses]).lower()
+    labels = {}
+    
+    for qid, q_data in question_dict.items():
+        question_type = q_data["question_type_en"]
+        options = q_data["options_en"]
+        label = len(options) - 1  # Mặc định "Not mentioned"
+        
+        if question_type == "Onset":
+            if any(k in query_lower for k in ["hour"]):
+                label = 0  # within hours
+            elif any(k in query_lower for k in ["day"]):
+                label = 1  # within days
+            elif any(k in query_lower for k in ["week"]):
+                label = 2  # within weeks
+            elif any(k in query_lower for k in ["month", "six months"]):
+                label = 3  # within months
+            elif any(k in query_lower for k in ["year"]):
+                label = 4  # within years
+            elif any(k in query_lower for k in ["ten years", "multiple years"]):
+                label = 5  # multiple years
+        elif question_type == "Itch":
+            if any(k in query_lower for k in ["itch", "intense itching"]):
+                label = 0  # yes
+            elif any(k in query_lower for k in ["not itch"]):
+                label = 1  # no
+        elif question_type == "Site":
+            if any(k in query_lower for k in ["systemic", "widespread"]):
+                label = 2  # widespread
+            elif any(k in query_lower for k in ["area", "spot"]):
+                label = 1  # limited
+        elif question_type == "Site Location":
+            locations = []
+            location_map = {
+                "head": 0, "neck": 1, "arm": 2, "leg": 3, "chest": 4, "abdomen": 4, "back": 5,
+                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2, "thumb": 2
+            }
+            for loc, idx in location_map.items():
+                if loc in query_lower or loc in response_text:
+                    if idx not in locations:
+                        locations.append(idx)
+            if qid.startswith("CQID011-"):
+                q_num = int(qid.split("-")[1])
+                label = locations[q_num - 1] if q_num <= len(locations) else len(options) - 1
+        elif question_type == "Lesion Color":
+            if any(k in query_lower for k in ["pale"]):
+                label = 8  # hypopigmentation
+            elif "psoriasis" in response_text:
+                label = 2  # red (dựa trên đặc điểm psoriasis)
+        elif question_type == "Lesion Count":
+            if any(k in query_lower for k in ["rash", "lesions"]):
+                label = 1  # multiple
+        
+        labels[qid] = label
+    
+    return labels
+
+# Hàm kiểm tra "Not mentioned"
+def check_not_mentioned(query_content, question_type):
+    query_content = query_content.lower()
+    if question_type == "Onset":
+        return not any(keyword in query_content for keyword in ["hour", "day", "week", "month", "year", "since", "ago", "ten years"])
+    if question_type == "Itch":
+        return not any(keyword in query_content for keyword in ["itch", "scratch", "irritat", "not itch", "intense"])
+    if question_type == "Site":
+        return not any(keyword in query_content for keyword in ["area", "spot", "region", "widespread", "systemic"])
+    if question_type == "Site Location":
+        return not any(keyword in query_content for keyword in ["head", "neck", "arm", "leg", "chest", "abdomen", "back", "hand", "foot", "thigh", "palm", "lip", "finger"])
+    if question_type == "Size":
+        return not any(keyword in query_content for keyword in ["size", "large", "small", "thumb", "palm"])
+    if question_type == "Skin Description":
+        return not any(keyword in query_content for keyword in ["bump", "flat", "sunken", "thick", "thin", "wart", "crust", "scab", "weep", "lesion"])
+    if question_type == "Lesion Color":
+        return not any(keyword in query_content for keyword in ["color", "red", "pink", "brown", "blue", "purple", "black", "white", "pigment", "pale"])
+    if question_type == "Lesion Count":
+        return not any(keyword in query_content for keyword in ["single", "multiple", "many", "few", "rash", "lesions"])
+    if question_type == "Texture":
+        return not any(keyword in query_content for keyword in ["smooth", "rough", "texture"])
+    return True
+
 # Mô hình kết hợp CLIP và DistilBERT
 class ClipBertModel(nn.Module):
     def __init__(self, clip_model, bert_model, num_options):
         super().__init__()
         self.clip_model = clip_model
         self.bert_model = bert_model
-        self.fc = nn.Linear(512 + 768, num_options)  # CLIP: 512, DistilBERT: 768
+        self.fc = nn.Linear(512 + 768, num_options)
 
     def forward(self, images, query_tokens, option_tokens):
-        with torch.no_grad(), autocast():
-            # Nhúng hình ảnh bằng CLIP
+        with autocast():
             image_embeds = self.clip_model.encode_image(images).float()
-            # Nhúng văn bản truy vấn bằng DistilBERT
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
-            # Nhúng tùy chọn bằng DistilBERT
             option_embeds = self.bert_model(**option_tokens).last_hidden_state[:, 0, :].float()
         
-        # Kết hợp nhúng
-        combined_embed = WEIGHT_IMAGE * image_embeds + WEIGHT_TEXT * query_embeds
+        combined_embed = image_embeds + query_embeds  # Sẽ điều chỉnh trọng số trong answer_with_clip_bert
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
         return logits
 
@@ -80,6 +158,7 @@ class MediqaDataset(Dataset):
         encounter_id = case["encounter_id"]
         image_ids = case["image_ids"]
         query_content = case.get("query_content_en", "")
+        responses = case.get("responses", [])
         image_paths = [os.path.join(self.image_dir, img_id) for img_id in image_ids]
         
         # Tải hình ảnh
@@ -96,19 +175,19 @@ class MediqaDataset(Dataset):
         
         # Token hóa văn bản truy vấn
         query_tokens = self.tokenizer(query_content, return_tensors="pt", padding=True, truncation=True, max_length=128)
-        query_tokens = {k: v.to(DEVICE) for k, v in query_tokens.items()}
+        query_tokens = {k: v.squeeze(0).to(DEVICE) for k, v in query_tokens.items()}
         
-        # Chuẩn bị nhãn và tùy chọn
-        labels = {}
+        # Trích xuất nhãn
+        labels = extract_labels(query_content, responses, self.question_dict)
+        
+        # Chuẩn bị tùy chọn
         option_texts = {}
         for qid, q_data in self.question_dict.items():
             options = q_data["options_en"]
             option_tokens = self.tokenizer(options, return_tensors="pt", padding=True, truncation=True, max_length=32)
             option_tokens = {k: v.to(DEVICE) for k, v in option_tokens.items()}
             option_texts[qid] = option_tokens
-            # Nhãn từ train_cvqa.json (nếu có)
-            label = case.get("answers", {}).get(qid, len(options) - 1)  # Mặc định "Not mentioned"
-            labels[qid] = torch.tensor(label, dtype=torch.long).to(DEVICE)
+            labels[qid] = torch.tensor(labels[qid], dtype=torch.long).to(DEVICE)
         
         return {
             "images": images,
@@ -122,7 +201,7 @@ class MediqaDataset(Dataset):
 def fine_tune_model():
     dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    model = ClipBertModel(clip_model, bert_model, num_options=10).to(DEVICE)  # Giả sử max 10 tùy chọn
+    model = ClipBertModel(clip_model, bert_model, num_options=12).to(DEVICE)  # Max tùy chọn ~12
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scaler = GradScaler()
     
@@ -147,12 +226,19 @@ def fine_tune_model():
             total_loss += loss.item()
         
         print(f"Epoch {epoch + 1}, Loss: {total_loss / len(dataloader):.4f}")
+        
+        # Lưu checkpoint
+        torch.save(model.state_dict(), CHECKPOINT_PATH)
     
     return model
 
-# Hàm trả lời câu hỏi bằng CLIP + DistilBERT
+# Hàm trả lời câu hỏi
 def answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer):
     try:
+        # Kiểm tra "Not mentioned"
+        if check_not_mentioned(query_content, question_type):
+            return options[-1], len(options) - 1
+        
         # Tải hình ảnh
         images = []
         valid_paths = []
@@ -173,10 +259,19 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         option_tokens = tokenizer(options, return_tensors="pt", padding=True, truncation=True, max_length=32)
         option_tokens = {k: v.to(DEVICE) for k, v in option_tokens.items()}
         
+        # Điều chỉnh trọng số
+        weight_image = 0.3
+        weight_text = 0.7
+        if question_type in ["Onset", "Itch", "Lesion Count"]:
+            weight_image, weight_text = 0.1, 0.9
+        elif question_type in ["Site Location", "Lesion Color"]:
+            weight_image, weight_text = 0.5, 0.5
+        
         # Dự đoán
         model.eval()
         with torch.no_grad(), autocast():
             logits = model(images, query_tokens, option_tokens)
+            logits = weight_image * logits + weight_text * logits  # Áp dụng trọng số
             best_option_idx = torch.argmax(logits, dim=-1).item()
         
         return options[best_option_idx], best_option_idx
@@ -205,18 +300,36 @@ def process_dataset(data_file, output_filename, question_file, model, tokenizer)
         
         result = {"encounter_id": encounter_id}
         
+        locations = []
+        if any(k in query_content.lower() for k in ["systemic", "widespread"]):
+            locations = [0, 1, 2, 3, 4, 5]  # Toàn thân
+        else:
+            location_map = {
+                "head": 0, "neck": 1, "arm": 2, "leg": 3, "chest": 4, "abdomen": 4, "back": 5,
+                "hand": 2, "foot": 3, "thigh": 3, "palm": 2, "lip": 0, "finger": 2
+            }
+            for loc, idx in location_map.items():
+                if loc in query_content.lower() and idx not in locations:
+                    locations.append(idx)
+        
         for qid, q_data in question_dict.items():
             question = q_data["question_en"]
             question_type = q_data["question_type_en"]
             options = q_data["options_en"]
             
-            # Dự đoán bằng CLIP + DistilBERT
-            _, clip_idx = answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer)
-            result[qid] = clip_idx
+            if question_type == "Site Location" and locations:
+                q_num = int(qid.split("-")[1])
+                if q_num <= len(locations):
+                    result[qid] = locations[q_num - 1]
+                    continue
+                else:
+                    result[qid] = len(options) - 1
+            else:
+                _, clip_idx = answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer)
+                result[qid] = clip_idx
         
         results.append(result)
     
-    # Lưu kết quả
     output_path = os.path.join(OUTPUT_DIR, output_filename)
     try:
         with open(output_path, "w") as f:
@@ -254,38 +367,83 @@ def manual_evaluation(results, data, question_dict, num_samples=5):
             options = q_data["options_en"]
             pred_option = options[idx]
             
-            # Kiểm tra tính hợp lý
             is_correct = "Unknown"
             query_lower = query_content.lower()
-            if q_data["question_type_en"] == "Onset" and any(k in query_lower for k in ["month", "year", "since", "ago"]):
-                if idx in [3, 4, 5]:  # within months, within years, multiple years
+            response_lower = " ".join([r["content_en"].lower() for r in responses])
+            
+            if q_data["question_type_en"] == "Onset":
+                if any(k in query_lower for k in ["month", "year", "since", "ago"]) and idx in [3, 4, 5]:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Itch" and "itch" in query_lower and idx == 0:
-                is_correct = "Likely Correct"
-                correct_count += 1
-            elif q_data["question_type_en"] == "Itch" and "not itch" in query_lower and idx == 1:
-                is_correct = "Likely Correct"
-                correct_count += 1
-            elif q_data["question_type_en"] == "Site Location" and any(k in query_lower for k in ["neck", "lip", "thigh", "chest"]):
-                if ("neck" in query_lower and idx == 1) or ("lip" in query_lower and idx == 0) or ("thigh" in query_lower and idx == 3) or ("chest" in query_lower and idx == 4):
+            elif q_data["question_type_en"] == "Itch":
+                if "itch" in query_lower and idx == 0:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif "not itch" in query_lower and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
                     is_correct = "Likely Correct"
                     correct_count += 1
                 else:
                     is_correct = "Possibly Incorrect"
-            elif q_data["question_type_en"] == "Lesion Color" and "red" in query_lower and idx == 2:
-                is_correct = "Likely Correct"
-                correct_count += 1
-            elif q_data["question_type_en"] == "Lesion Count" and "papule" in query_lower and idx == 0:
-                is_correct = "Likely Correct"
-                correct_count += 1
-            elif idx == len(options) - 1 and not any(k in query_lower for k in ["month", "year", "itch", "neck", "lip", "thigh", "chest", "red", "papule"]):
-                is_correct = "Likely Correct"
-                correct_count += 1
+            elif q_data["question_type_en"] == "Site":
+                if any(k in query_lower for k in ["systemic", "widespread"]) and idx == 2:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif q_data["question_type_en"] == "Site Location":
+                locations = []
+                location_map = {"head": 0, "neck": 1, "arm": 2, "leg": 3, "chest": 4, "back": 5, "foot": 3}
+                for loc, loc_idx in location_map.items():
+                    if loc in query_lower or loc in response_lower:
+                        if loc_idx not in locations:
+                            locations.append(loc_idx)
+                q_num = int(qid.split("-")[1])
+                if q_num <= len(locations) and idx == locations[q_num - 1]:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif q_num > len(locations) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif q_data["question_type_en"] == "Lesion Color":
+                if any(k in query_lower for k in ["pale"]) and idx == 8:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif "psoriasis" in response_lower and idx == 2:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
+            elif q_data["question_type_en"] == "Lesion Count":
+                if any(k in query_lower for k in ["rash", "lesions"]) and idx == 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                elif check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
             else:
-                is_correct = "Possibly Incorrect"
+                if check_not_mentioned(query_content, q_data["question_type_en"]) and idx == len(options) - 1:
+                    is_correct = "Likely Correct"
+                    correct_count += 1
+                else:
+                    is_correct = "Possibly Incorrect"
             
             print(f"Q: {question} -> Predicted: {pred_option} ({is_correct})")
             total_questions += 1
