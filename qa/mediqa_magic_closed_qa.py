@@ -23,7 +23,11 @@ BATCH_SIZE = 32
 LEARNING_RATE = 1e-5
 EPOCHS = 3
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
-MAX_IMAGES = 5  # Giới hạn số hình ảnh tối đa để tiết kiệm VRAM
+MAX_IMAGES = 5
+MAX_LENGTH = 128
+
+# Xóa cache CUDA
+torch.cuda.empty_cache()
 
 # Kiểm tra file tồn tại
 for f in [QUESTION_FILE, TRAIN_FILE, VALID_FILE, TEST_FILE]:
@@ -39,7 +43,7 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load models: {e}")
 
-# Hàm trích xuất nhãn từ truy vấn và phản hồi
+# Hàm trích xuất nhãn
 def extract_labels(query_content, responses, question_dict):
     query_lower = query_content.lower()
     response_text = " ".join([r["content_en"].lower() for r in responses]).lower()
@@ -48,31 +52,31 @@ def extract_labels(query_content, responses, question_dict):
     for qid, q_data in question_dict.items():
         question_type = q_data["question_type_en"]
         options = q_data["options_en"]
-        label = len(options) - 1  # Mặc định "Not mentioned"
+        label = len(options) - 1
         
         if question_type == "Onset":
             if any(k in query_lower for k in ["hour"]):
-                label = 0  # within hours
+                label = 0
             elif any(k in query_lower for k in ["day"]):
-                label = 1  # within days
+                label = 1
             elif any(k in query_lower for k in ["week"]):
-                label = 2  # within weeks
+                label = 2
             elif any(k in query_lower for k in ["month", "six months"]):
-                label = 3  # within months
+                label = 3
             elif any(k in query_lower for k in ["year"]):
-                label = 4  # within years
+                label = 4
             elif any(k in query_lower for k in ["ten years", "multiple years"]):
-                label = 5  # multiple years
+                label = 5
         elif question_type == "Itch":
             if any(k in query_lower for k in ["itch", "intense itching"]):
-                label = 0  # yes
+                label = 0
             elif any(k in query_lower for k in ["not itch"]):
-                label = 1  # no
+                label = 1
         elif question_type == "Site":
             if any(k in query_lower for k in ["systemic", "widespread"]):
-                label = 2  # widespread
+                label = 2
             elif any(k in query_lower for k in ["area", "spot"]):
-                label = 1  # limited
+                label = 1
         elif question_type == "Site Location":
             locations = []
             location_map = {
@@ -88,12 +92,12 @@ def extract_labels(query_content, responses, question_dict):
                 label = locations[q_num - 1] if q_num <= len(locations) else len(options) - 1
         elif question_type == "Lesion Color":
             if any(k in query_lower for k in ["pale"]):
-                label = 8  # hypopigmentation
+                label = 8
             elif "psoriasis" in response_text:
-                label = 2  # red
+                label = 2
         elif question_type == "Lesion Count":
             if any(k in query_lower for k in ["rash", "lesions"]):
-                label = 1  # multiple
+                label = 1
         
         labels[qid] = label
     
@@ -175,11 +179,16 @@ class MediqaDataset(Dataset):
                 continue
         if not image_embeds:
             image_embeds = [torch.zeros(1, 512).to(DEVICE)]
-        # Lấy trung bình nhúng
-        image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)  # [1, 512]
+        image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)
         
         # Token hóa văn bản truy vấn
-        query_tokens = self.tokenizer(query_content, return_tensors="pt", padding=True, truncation=True, max_length=128)
+        query_tokens = self.tokenizer(
+            query_content,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=MAX_LENGTH
+        )
         query_tokens = {k: v.squeeze(0).to(DEVICE) for k, v in query_tokens.items()}
         
         # Trích xuất nhãn
@@ -189,7 +198,13 @@ class MediqaDataset(Dataset):
         option_texts = {}
         for qid, q_data in self.question_dict.items():
             options = q_data["options_en"]
-            option_tokens = self.tokenizer(options, return_tensors="pt", padding=True, truncation=True, max_length=32)
+            option_tokens = self.tokenizer(
+                options,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=32
+            )
             option_tokens = {k: v.to(DEVICE) for k, v in option_tokens.items()}
             option_texts[qid] = option_tokens
             labels[qid] = torch.tensor(labels[qid], dtype=torch.long).to(DEVICE)
@@ -202,10 +217,47 @@ class MediqaDataset(Dataset):
             "encounter_id": encounter_id
         }
 
+# Hàm collate_fn để chuẩn hóa batch
+def collate_fn(batch):
+    image_embeds = torch.cat([item["image_embeds"] for item in batch], dim=0)
+    
+    # Chuẩn hóa query_tokens
+    query_input_ids = torch.stack([item["query_tokens"]["input_ids"] for item in batch])
+    query_attention_mask = torch.stack([item["query_tokens"]["attention_mask"] for item in batch])
+    query_tokens = {
+        "input_ids": query_input_ids,
+        "attention_mask": query_attention_mask
+    }
+    
+    # Chuẩn hóa option_texts
+    option_texts = {}
+    for qid in batch[0]["option_texts"]:
+        option_input_ids = torch.stack([item["option_texts"][qid]["input_ids"] for item in batch])
+        option_attention_mask = torch.stack([item["option_texts"][qid]["attention_mask"] for item in batch])
+        option_texts[qid] = {
+            "input_ids": option_input_ids,
+            "attention_mask": option_attention_mask
+        }
+    
+    # Chuẩn hóa labels
+    labels = {}
+    for qid in batch[0]["labels"]:
+        labels[qid] = torch.stack([item["labels"][qid] for item in batch])
+    
+    encounter_ids = [item["encounter_id"] for item in batch]
+    
+    return {
+        "image_embeds": image_embeds,
+        "query_tokens": query_tokens,
+        "option_texts": option_texts,
+        "labels": labels,
+        "encounter_id": encounter_ids
+    }
+
 # Tinh chỉnh mô hình
 def fine_tune_model():
     dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR, clip_model)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
     model = ClipBertModel(clip_model, bert_model, num_options=12).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scaler = torch.amp.GradScaler('cuda')
@@ -240,7 +292,6 @@ def fine_tune_model():
 # Hàm trả lời câu hỏi
 def answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer, clip_model):
     try:
-        # Kiểm tra "Not mentioned"
         if check_not_mentioned(query_content, question_type):
             return options[-1], len(options) - 1
         
@@ -257,12 +308,24 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
                 continue
         if not image_embeds:
             image_embeds = [torch.zeros(1, 512).to(DEVICE)]
-        image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)  # [1, 512]
+        image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)
         
         # Token hóa văn bản
-        query_tokens = tokenizer(query_content, return_tensors="pt", padding=True, truncation=True, max_length=128)
+        query_tokens = tokenizer(
+            query_content,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=MAX_LENGTH
+        )
         query_tokens = {k: v.to(DEVICE) for k, v in query_tokens.items()}
-        option_tokens = tokenizer(options, return_tensors="pt", padding=True, truncation=True, max_length=32)
+        option_tokens = tokenizer(
+            options,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=32
+        )
         option_tokens = {k: v.to(DEVICE) for k, v in option_tokens.items()}
         
         # Điều chỉnh trọng số
