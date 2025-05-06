@@ -20,7 +20,7 @@ VALID_FILE = "/kaggle/input/mediqa-data/mediqa-data/valid.json"
 TEST_FILE = "/kaggle/input/mediqa-data/mediqa-data/test.json"
 QUESTION_FILE = "/kaggle/input/mediqa-data/mediqa-data/closedquestions_definitions_imageclef2025.json"
 OUTPUT_DIR = "/kaggle/working"
-BATCH_SIZE = 8  # Giảm từ 16 xuống 8 để tránh OOM
+BATCH_SIZE = 8
 LEARNING_RATE = 1e-5
 EPOCHS = 3
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
@@ -140,23 +140,24 @@ class ClipBertModel(nn.Module):
 
     def forward(self, image_embeds, query_tokens, option_tokens):
         with autocast(device_type=DEVICE_TYPE):
+            # Nhúng query
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
+            
+            # Biến đổi image_embeds
             image_embeds = self.image_projection(image_embeds).float()
             
+            # Nhúng option_tokens một lần
+            option_embeds = self.bert_model(
+                input_ids=option_tokens["input_ids"].view(-1, option_tokens["input_ids"].size(-1)),
+                attention_mask=option_tokens["attention_mask"].view(-1, option_tokens["attention_mask"].size(-1))
+            ).last_hidden_state[:, 0, :].float()
+            
+            # Reshape để khớp batch_size
             batch_size = image_embeds.size(0)
             num_options = option_tokens["input_ids"].size(1)
-            option_embeds = []
-            
-            for i in range(num_options):
-                single_option_tokens = {
-                    "input_ids": option_tokens["input_ids"][:, i, :],
-                    "attention_mask": option_tokens["attention_mask"][:, i, :]
-                }
-                embed = self.bert_model(**single_option_tokens).last_hidden_state[:, 0, :].float()
-                option_embeds.append(embed)
-            
-            option_embeds = torch.stack(option_embeds, dim=1).mean(dim=1)
+            option_embeds = option_embeds.view(batch_size, num_options, -1).mean(dim=1)
         
+        # Kết hợp embedding
         combined_embed = image_embeds + query_embeds
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
         return logits
@@ -327,6 +328,7 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
             max_length=MAX_LENGTH
         )
         query_tokens = {k: v.to(DEVICE) for k, v in query_tokens.items()}
+        
         option_tokens = tokenizer(
             options,
             return_tensors="pt",
@@ -336,8 +338,8 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         )
         option_tokens = {k: v.to(DEVICE) for k, v in option_tokens.items()}
         
-        weight_image = 0.3
-        weight_text = 0.7
+        weight_image = 0.4  # Tăng trọng số hình ảnh
+        weight_text = 0.6   # Giảm trọng số văn bản
         if question_type in ["Onset", "Itch", "Lesion Count"]:
             weight_image, weight_text = 0.1, 0.9
         elif question_type in ["Site Location", "Lesion Color"]:
@@ -347,7 +349,7 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         with torch.no_grad(), autocast(device_type=DEVICE_TYPE):
             logits = model(image_embed, query_tokens, option_tokens)
             logits = weight_image * logits + weight_text * logits
-            best_option_idx = torch.argmax(logits, dim=-1).item()
+            best_option_idx = torch.argmax(logits, dim=1).item()
         
         return options[best_option_idx], best_option_idx
     except Exception as e:
