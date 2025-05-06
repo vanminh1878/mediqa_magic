@@ -8,7 +8,7 @@ from PIL import Image
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import Dataset, DataLoader
 
 # Cấu hình
@@ -23,6 +23,7 @@ BATCH_SIZE = 32
 LEARNING_RATE = 1e-5
 EPOCHS = 3
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "model_checkpoint.pt")
+MAX_IMAGES = 5  # Giới hạn số hình ảnh tối đa để tiết kiệm VRAM
 
 # Kiểm tra file tồn tại
 for f in [QUESTION_FILE, TRAIN_FILE, VALID_FILE, TEST_FILE]:
@@ -89,7 +90,7 @@ def extract_labels(query_content, responses, question_dict):
             if any(k in query_lower for k in ["pale"]):
                 label = 8  # hypopigmentation
             elif "psoriasis" in response_text:
-                label = 2  # red (dựa trên đặc điểm psoriasis)
+                label = 2  # red
         elif question_type == "Lesion Count":
             if any(k in query_lower for k in ["rash", "lesions"]):
                 label = 1  # multiple
@@ -129,19 +130,18 @@ class ClipBertModel(nn.Module):
         self.bert_model = bert_model
         self.fc = nn.Linear(512 + 768, num_options)
 
-    def forward(self, images, query_tokens, option_tokens):
+    def forward(self, image_embeds, query_tokens, option_tokens):
         with autocast():
-            image_embeds = self.clip_model.encode_image(images).float()
             query_embeds = self.bert_model(**query_tokens).last_hidden_state[:, 0, :].float()
             option_embeds = self.bert_model(**option_tokens).last_hidden_state[:, 0, :].float()
         
-        combined_embed = image_embeds + query_embeds  # Sẽ điều chỉnh trọng số trong answer_with_clip_bert
+        combined_embed = image_embeds + query_embeds
         logits = self.fc(torch.cat([combined_embed, option_embeds], dim=-1))
         return logits
 
 # Dataset cho tinh chỉnh
 class MediqaDataset(Dataset):
-    def __init__(self, data_file, question_file, image_dir):
+    def __init__(self, data_file, question_file, image_dir, clip_model):
         with open(data_file, "r") as f:
             self.data = json.load(f)
         with open(question_file, "r") as f:
@@ -149,6 +149,7 @@ class MediqaDataset(Dataset):
         self.image_dir = image_dir
         self.question_dict = {q["qid"]: q for q in self.questions}
         self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+        self.clip_model = clip_model
 
     def __len__(self):
         return len(self.data)
@@ -161,17 +162,21 @@ class MediqaDataset(Dataset):
         responses = case.get("responses", [])
         image_paths = [os.path.join(self.image_dir, img_id) for img_id in image_ids]
         
-        # Tải hình ảnh
-        images = []
-        for path in image_paths:
+        # Tải và nhúng hình ảnh
+        image_embeds = []
+        for path in image_paths[:MAX_IMAGES]:
             try:
                 img = Image.open(path).convert("RGB")
-                images.append(preprocess(img))
+                img_tensor = preprocess(img).unsqueeze(0).to(DEVICE)
+                with torch.no_grad(), autocast():
+                    embed = self.clip_model.encode_image(img_tensor).float()
+                image_embeds.append(embed)
             except:
                 continue
-        if not images:
-            images = [torch.zeros(3, 224, 224)]
-        images = torch.stack(images).to(DEVICE)
+        if not image_embeds:
+            image_embeds = [torch.zeros(1, 512).to(DEVICE)]
+        # Lấy trung bình nhúng
+        image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)  # [1, 512]
         
         # Token hóa văn bản truy vấn
         query_tokens = self.tokenizer(query_content, return_tensors="pt", padding=True, truncation=True, max_length=128)
@@ -190,7 +195,7 @@ class MediqaDataset(Dataset):
             labels[qid] = torch.tensor(labels[qid], dtype=torch.long).to(DEVICE)
         
         return {
-            "images": images,
+            "image_embeds": image_embed,
             "query_tokens": query_tokens,
             "option_texts": option_texts,
             "labels": labels,
@@ -199,17 +204,17 @@ class MediqaDataset(Dataset):
 
 # Tinh chỉnh mô hình
 def fine_tune_model():
-    dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR)
+    dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR, clip_model)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    model = ClipBertModel(clip_model, bert_model, num_options=12).to(DEVICE)  # Max tùy chọn ~12
+    model = ClipBertModel(clip_model, bert_model, num_options=12).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
     
     for epoch in range(EPOCHS):
         model.train()
         total_loss = 0
         for batch in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{EPOCHS}"):
-            images = batch["images"]
+            image_embeds = batch["image_embeds"]
             query_tokens = batch["query_tokens"]
             option_texts = batch["option_texts"]
             labels = batch["labels"]
@@ -218,7 +223,7 @@ def fine_tune_model():
             with autocast():
                 loss = 0
                 for qid in option_texts:
-                    logits = model(images, query_tokens, option_texts[qid])
+                    logits = model(image_embeds, query_tokens, option_texts[qid])
                     loss += nn.CrossEntropyLoss()(logits, labels[qid])
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -233,25 +238,26 @@ def fine_tune_model():
     return model
 
 # Hàm trả lời câu hỏi
-def answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer):
+def answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer, clip_model):
     try:
         # Kiểm tra "Not mentioned"
         if check_not_mentioned(query_content, question_type):
             return options[-1], len(options) - 1
         
-        # Tải hình ảnh
-        images = []
-        valid_paths = []
-        for path in image_paths:
+        # Tải và nhúng hình ảnh
+        image_embeds = []
+        for path in image_paths[:MAX_IMAGES]:
             try:
                 img = Image.open(path).convert("RGB")
-                images.append(preprocess(img))
-                valid_paths.append(path)
+                img_tensor = preprocess(img).unsqueeze(0).to(DEVICE)
+                with torch.no_grad(), autocast():
+                    embed = clip_model.encode_image(img_tensor).float()
+                image_embeds.append(embed)
             except:
                 continue
-        if not images:
-            return options[-1], len(options) - 1
-        images = torch.stack(images).to(DEVICE)
+        if not image_embeds:
+            image_embeds = [torch.zeros(1, 512).to(DEVICE)]
+        image_embed = torch.mean(torch.cat(image_embeds, dim=0), dim=0, keepdim=True)  # [1, 512]
         
         # Token hóa văn bản
         query_tokens = tokenizer(query_content, return_tensors="pt", padding=True, truncation=True, max_length=128)
@@ -270,8 +276,8 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         # Dự đoán
         model.eval()
         with torch.no_grad(), autocast():
-            logits = model(images, query_tokens, option_tokens)
-            logits = weight_image * logits + weight_text * logits  # Áp dụng trọng số
+            logits = model(image_embed, query_tokens, option_tokens)
+            logits = weight_image * logits + weight_text * logits
             best_option_idx = torch.argmax(logits, dim=-1).item()
         
         return options[best_option_idx], best_option_idx
@@ -280,7 +286,7 @@ def answer_with_clip_bert(model, image_paths, query_content, question, question_
         return options[-1], len(options) - 1
 
 # Hàm xử lý tập dữ liệu
-def process_dataset(data_file, output_filename, question_file, model, tokenizer):
+def process_dataset(data_file, output_filename, question_file, model, tokenizer, clip_model):
     try:
         with open(data_file, "r") as f:
             data = json.load(f)
@@ -302,7 +308,7 @@ def process_dataset(data_file, output_filename, question_file, model, tokenizer)
         
         locations = []
         if any(k in query_content.lower() for k in ["systemic", "widespread"]):
-            locations = [0, 1, 2, 3, 4, 5]  # Toàn thân
+            locations = [0, 1, 2, 3, 4, 5]
         else:
             location_map = {
                 "head": 0, "neck": 1, "arm": 2, "leg": 3, "chest": 4, "abdomen": 4, "back": 5,
@@ -325,7 +331,7 @@ def process_dataset(data_file, output_filename, question_file, model, tokenizer)
                 else:
                     result[qid] = len(options) - 1
             else:
-                _, clip_idx = answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer)
+                _, clip_idx = answer_with_clip_bert(model, image_paths, query_content, question, question_type, options, tokenizer, clip_model)
                 result[qid] = clip_idx
         
         results.append(result)
@@ -477,11 +483,11 @@ def main():
         model = fine_tune_model()
         
         # Xử lý tập valid
-        valid_results, valid_data, question_dict = process_dataset(VALID_FILE, "closed_qa_valid_results.json", QUESTION_FILE, model, tokenizer)
+        valid_results, valid_data, question_dict = process_dataset(VALID_FILE, "closed_qa_valid_results.json", QUESTION_FILE, model, tokenizer, clip_model)
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_valid_results.json"), QUESTION_FILE)
         
         # Xử lý tập test
-        test_results, test_data, _ = process_dataset(TEST_FILE, "closed_qa_test_results.json", QUESTION_FILE, model, tokenizer)
+        test_results, test_data, _ = process_dataset(TEST_FILE, "closed_qa_test_results.json", QUESTION_FILE, model, tokenizer, clip_model)
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_test_results.json"), QUESTION_FILE)
         
         # Đánh giá thủ công
