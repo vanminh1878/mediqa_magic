@@ -554,7 +554,7 @@ def main():
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_valid_results.json"), QUESTION_FILE)
         
         # Xử lý tập test
-        test_results, test_data, _ = process_dataset(TEST_FILE, "closed_qa_test_results.json", QUESTION_FILE, model, tokenizer, clip_model)
+        test_results, test_data, question_dict = process_dataset(TEST_FILE, "closed_qa_test_results.json", QUESTION_FILE, model, tokenizer, clip_model)
         validate_output(os.path.join(OUTPUT_DIR, "closed_qa_test_results.json"), QUESTION_FILE)
         
         # Đánh giá thủ công
@@ -563,6 +563,7 @@ def main():
         
     except Exception as e:
         print(f"Error in main: {e}")
+        raise  # Raise the exception for debugging
 
 if __name__ == "__main__":
     main()
