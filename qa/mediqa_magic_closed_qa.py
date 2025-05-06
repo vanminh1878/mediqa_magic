@@ -328,7 +328,7 @@ def collate_fn(batch):
 # Tinh chỉnh mô hình
 def fine_tune_model():
     dataset = MediqaDataset(TRAIN_FILE, QUESTION_FILE, IMAGE_DIR, clip_model)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0)
     model = ClipBertModel(clip_model, bert_model, max_options=12).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scaler = torch.amp.GradScaler('cuda')
